@@ -1,0 +1,5 @@
+/.env
+/.local/
+/var/
+*.swp
+*.log
