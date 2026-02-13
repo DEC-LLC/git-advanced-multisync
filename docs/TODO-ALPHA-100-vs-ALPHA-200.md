@@ -13,6 +13,7 @@
 - [ ] Add idempotent repo bootstrap path for GitHub/GitLab.
 
 ## API/UI
+- [ ] Add cross-system work-item sync control panel (issues/PRs/MRs).
 - [ ] REST endpoints for mappings, profiles, jobs, policy checks.
 - [ ] Minimal UI for per-repo start/stop and visibility policy status.
 - [ ] Add role-based admin controls for policy overrides.

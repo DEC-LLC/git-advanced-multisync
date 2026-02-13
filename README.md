@@ -16,6 +16,8 @@ Perl-based standalone add-on for multi-account GitHub<->GitLab sync management.
   - `docs/ALPHA-100-CAPABILITIES.md`
   - `docs/TODO-ALPHA-100-vs-ALPHA-200.md`
   - `docs/issues/ISSUE-0001-privacy-policy-engine.md`
+  - `docs/issues/ISSUE-0002-cross-system-work-items-sync.md`
+  - `docs/SYNC-SCOPE-MIN-MAX.md`
 
 ## Quick start (dev)
 ```bash
