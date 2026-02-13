@@ -3,7 +3,7 @@ use strict;
 use warnings;
 use FindBin;
 use lib "$FindBin::Bin/../lib";
-use Syncd::App;
+use Gitmsyncd::App;
 
-my $app = Syncd::App->new();
+my $app = Gitmsyncd::App->new();
 $app->start();
