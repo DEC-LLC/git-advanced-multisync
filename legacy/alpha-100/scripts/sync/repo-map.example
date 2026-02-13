@@ -1,0 +1,4 @@
+# format: <gitlab_full_path>|<github_owner>/<github_repo>
+# example overrides:
+# github-mirror/DECLLC-GITLAB|mvdiwan/DECLLC-GITLAB
+# github-mirror/Networking-Wizard|mvdiwan/Networking-Wizard

@@ -1,0 +1,7 @@
+f6440efa4cd0b61e0f182d9f0076d88316f8cdd59b477b6764765fb45e2545a8  legacy/alpha-100/scripts/github_gitlab_mirror.sh
+a7d8138dbeb25e78d71d3629acca174af7666077b4b3ae74ec2cfa8fa3cd3b06  legacy/alpha-100/scripts/sync/gitlab_github_mirror.sh
+9adc8beddabd1ca2d51300283004ff233aa0636a430bc97fbabb0277b79d7c82  legacy/alpha-100/scripts/sync/run_sync_profile.sh
+8b53097bc7e16ffd40458edc582a1a6d7d8c39906e3598c8706ad9f94a3a884e  legacy/alpha-100/scripts/github-gitlab-mirror.env.example
+c35c0a24e216dea671d203798ceb3663c55c7d8a49f95487fb217f363110274c  legacy/alpha-100/scripts/sync/github_to_gitlab.madhav.env.example
+e75a625a818d622c092a4536a3c326812bd3a5fcd6fa0d20668bc3eb7c3eb1d1  legacy/alpha-100/scripts/sync/gitlab_to_github.madhav.env.example
+b91282f45dc2d0088dad31cda5827c721dd672e8ffc49c2ead9bb976034b24cc  legacy/alpha-100/scripts/sync/repo-map.example
