@@ -1,4 +1,4 @@
-# gitlab-advanced-multisync alpha-200 Architecture
+# git-advanced-multisync alpha-200 Architecture
 
 ## Objective
 Perl-based standalone service (`gitmsyncd`) for multi-account, multi-owner GitHub<->GitLab synchronization with mapping controls, API, and minimal UI.
