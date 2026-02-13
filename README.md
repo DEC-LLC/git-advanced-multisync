@@ -1,4 +1,4 @@
-# gitlab-advanced-multisync (alpha-200 scaffold)
+# git-advanced-multisync (alpha-200 scaffold)
 
 Perl-based standalone add-on for multi-account GitHub<->GitLab sync management.
 
@@ -19,7 +19,7 @@ Perl-based standalone add-on for multi-account GitHub<->GitLab sync management.
 
 ## Quick start (dev)
 ```bash
-cd gitlab-advanced-multisync
+cd git-advanced-multisync
 cpanm --installdeps .
 psql -U gitmsyncd -d gitmsyncd -f db/schema.sql
 GITMSYNCD_DSN='dbi:Pg:dbname=gitmsyncd;host=127.0.0.1;port=5432' \
