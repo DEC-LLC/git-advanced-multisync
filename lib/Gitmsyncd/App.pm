@@ -1,4 +1,4 @@
-package Syncd::App;
+package Gitmsyncd::App;
 use strict;
 use warnings;
 use Mojolicious::Lite -signatures;
@@ -12,9 +12,9 @@ sub new {
 sub start {
   my ($self) = @_;
 
-  my $dsn  = $ENV{SYNCD_DSN}  || 'dbi:Pg:dbname=syncd;host=127.0.0.1;port=5432';
-  my $user = $ENV{SYNCD_DB_USER} || 'syncd';
-  my $pass = $ENV{SYNCD_DB_PASS} || 'syncd';
+  my $dsn  = $ENV{GITMSYNCD_DSN}  || 'dbi:Pg:dbname=gitmsyncd;host=127.0.0.1;port=5432';
+  my $user = $ENV{GITMSYNCD_DB_USER} || 'gitmsyncd';
+  my $pass = $ENV{GITMSYNCD_DB_PASS} || 'gitmsyncd';
 
   helper dbh => sub {
     state $dbh = DBI->connect($dsn, $user, $pass, { RaiseError => 1, AutoCommit => 1, pg_enable_utf8 => 1 });
@@ -67,7 +67,7 @@ sub start {
     $c->render(template => 'index');
   };
 
-  app->start('daemon', '-l', ($ENV{SYNCD_LISTEN} || 'http://127.0.0.1:9097'));
+  app->start('daemon', '-l', ($ENV{GITMSYNCD_LISTEN} || 'http://127.0.0.1:9097'));
 }
 
 1;

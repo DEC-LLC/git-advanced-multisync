@@ -3,7 +3,7 @@
 Perl-based standalone add-on for multi-account GitHub<->GitLab sync management.
 
 ## Included in alpha-200 scaffold
-- `bin/syncd.pl` backend entrypoint
+- `bin/gitmsyncd.pl` backend entrypoint
 - PostgreSQL schema: `db/schema.sql`
 - REST API skeleton
 - Minimal web UI template
@@ -21,11 +21,11 @@ Perl-based standalone add-on for multi-account GitHub<->GitLab sync management.
 ```bash
 cd gitlab-advanced-multisync
 cpanm --installdeps .
-psql -U syncd -d syncd -f db/schema.sql
-SYNCD_DSN='dbi:Pg:dbname=syncd;host=127.0.0.1;port=5432' \
-SYNCD_DB_USER='syncd' \
-SYNCD_DB_PASS='syncd' \
-  perl bin/syncd.pl
+psql -U gitmsyncd -d gitmsyncd -f db/schema.sql
+GITMSYNCD_DSN='dbi:Pg:dbname=gitmsyncd;host=127.0.0.1;port=5432' \
+GITMSYNCD_DB_USER='gitmsyncd' \
+GITMSYNCD_DB_PASS='gitmsyncd' \
+  perl bin/gitmsyncd.pl
 ```
 
 Then open `http://127.0.0.1:9097`.

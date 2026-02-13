@@ -1,10 +1,10 @@
 # gitlab-advanced-multisync alpha-200 Architecture
 
 ## Objective
-Perl-based standalone service (`syncd`) for multi-account, multi-owner GitHub<->GitLab synchronization with mapping controls, API, and minimal UI.
+Perl-based standalone service (`gitmsyncd`) for multi-account, multi-owner GitHub<->GitLab synchronization with mapping controls, API, and minimal UI.
 
 ## Core Components
-- `syncd` daemon (Perl): scheduler + worker orchestration.
+- `gitmsyncd` daemon (Perl): scheduler + worker orchestration.
 - PostgreSQL metadata DB: mappings, profiles, sync runs, conflict logs.
 - REST API: config + job control.
 - Minimal Web UI: mapping management and run controls.
