@@ -34,3 +34,10 @@ Scope: Standalone Perl sync engine (`gitmsyncd`) for advanced mapping/policy/wor
 - GitLab project: `github-mirror/git-advanced-multisync` (private)
 - GitHub mirror: `mvdiwan/git-advanced-multisync` (private)
 - Auto-mirror path is operational.
+
+## Restart checkpoint (2026-02-13, pre-restart)
+- Canonical filesystem location is now:
+  - `/home/madhav/Documents/DECLLC-Code-Projects/GIT-ADVANCED-MULTISYNC`
+- Legacy compatibility path currently exists as symlink:
+  - `/home/madhav/Documents/DECLLC-Code-Projects/DECLLC-GITLAB/git-advanced-multisync`
+- Keep symlink until dependency check is complete in local-install TODOs.
