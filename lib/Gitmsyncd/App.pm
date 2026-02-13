@@ -4,11 +4,6 @@ use warnings;
 use Mojolicious::Lite -signatures;
 use DBI;
 
-sub new {
-  my ($class) = @_;
-  return bless {}, $class;
-}
-
 sub start {
   my ($self) = @_;
 

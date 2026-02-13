@@ -5,5 +5,4 @@ use FindBin;
 use lib "$FindBin::Bin/../lib";
 use Gitmsyncd::App;
 
-my $app = Gitmsyncd::App->new();
-$app->start();
+Gitmsyncd::App::start();
