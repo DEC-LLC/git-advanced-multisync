@@ -270,8 +270,9 @@
       // Fetch events
       fetch('/api/sync/jobs/' + jobId)
         .then(function(r) { return r.json(); })
-        .then(function(events) {
-          if (events.length === 0) {
+        .then(function(data) {
+          var events = data.events || data || [];
+          if (!events.length) {
             document.getElementById('eventLogEmpty').classList.remove('d-none');
             return;
           }
