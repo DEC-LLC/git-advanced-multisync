@@ -134,6 +134,7 @@ curl -X POST http://localhost:9097/api/sync/run/1
 - **Scheduled sync** — Cron-style schedules per profile. Set it and forget it.
 - **Webhook triggers** — Receive push webhooks from providers and sync immediately on change instead of polling.
 - **Diff preview** — Before syncing, show what commits would be pushed and flag potential conflicts.
+- **Issue and PR/MR sync** — Synchronize issues, pull requests, and merge requests across providers. Map labels, milestones, assignees, and comments between GitHub Issues/PRs, GitLab Issues/MRs, and Gitea Issues/PRs. Bidirectional with loop prevention so a synced comment doesn't bounce back as a duplicate.
 
 ## License
 
