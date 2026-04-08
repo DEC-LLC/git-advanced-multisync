@@ -107,7 +107,13 @@ The **Test Connection** button verifies the token works by calling the provider'
 
 ### Step 2: Create Sync Profiles
 
-A profile defines a sync relationship between two provider orgs/groups.
+A profile defines a sync relationship between two provider orgs/groups. You can create **multiple profiles between the same provider pair** with different names, directions, and conflict policies. For example:
+
+- `gitlab-to-github-mirror` (one-way, force-push) — authoritative mirror
+- `gitlab-to-github-safe` (one-way, ff-only) — safe sync that rejects on divergence
+- `gitlab-github-bidirectional` (bidirectional, ff-only) — two-way sync
+
+The profile name is the unique identifier, not the provider pair. Use as many profiles as your workflow needs.
 
 ```
 ┌─────────────────────────────────────────────────────┐

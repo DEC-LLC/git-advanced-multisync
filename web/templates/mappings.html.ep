@@ -1,0 +1,608 @@
+<%# Route for App.pm:
+  get '/mappings' => sub ($c) {
+    my $profiles = $c->dbh->selectall_arrayref(
+      q{SELECT id, name FROM sync_profiles ORDER BY name}, { Slice => {} });
+    my $mappings = $c->dbh->selectall_arrayref(
+      q{SELECT rm.*, sp.name as profile_name
+        FROM repo_mappings rm
+        LEFT JOIN sync_profiles sp ON rm.profile_id = sp.id
+        ORDER BY rm.id DESC LIMIT 100}, { Slice => {} });
+    $c->stash(profiles => $profiles, mappings => $mappings);
+    $c->render(template => 'mappings');
+  };
+
+  # DB migration needed:
+  # ALTER TABLE repo_mappings ADD COLUMN IF NOT EXISTS profile_id BIGINT REFERENCES sync_profiles(id);
+
+  # API routes needed (add if not present):
+  post '/api/mappings' => sub ($c) {
+    my $p = $c->req->json || {};
+    $c->dbh->do(
+      q{INSERT INTO repo_mappings (source_provider, source_full_path, target_provider, target_full_path, direction, enabled, profile_id)
+        VALUES (?, ?, ?, ?, ?, COALESCE(?, TRUE), ?)},
+      undef,
+      $p->{source_provider}, $p->{source_full_path},
+      $p->{target_provider}, $p->{target_full_path},
+      $p->{direction}, $p->{enabled}, $p->{profile_id});
+    $c->render(json => { ok => Mojo::JSON->true });
+  };
+
+  put '/api/mappings/:id' => sub ($c) {
+    my $id = $c->param('id');
+    my $p = $c->req->json || {};
+    my @sets; my @vals;
+    for my $k (qw(source_provider source_full_path target_provider target_full_path direction enabled profile_id)) {
+      if (exists $p->{$k}) { push @sets, "$k = ?"; push @vals, $p->{$k}; }
+    }
+    push @vals, $id;
+    $c->dbh->do("UPDATE repo_mappings SET " . join(', ', @sets) . " WHERE id = ?", undef, @vals) if @sets;
+    $c->render(json => { ok => Mojo::JSON->true });
+  };
+
+  del '/api/mappings/:id' => sub ($c) {
+    my $id = $c->param('id');
+    $c->dbh->do(q{DELETE FROM repo_mappings WHERE id = ?}, undef, $id);
+    $c->render(json => { ok => Mojo::JSON->true });
+  };
+
+  # Auto-discover repos for a provider
+  get '/api/providers/:id/repos' => sub ($c) {
+    my $id = $c->param('id');
+    my $provider = $c->dbh->selectrow_hashref(q{SELECT * FROM providers WHERE id = ?}, undef, $id);
+    unless ($provider) { return $c->render(json => { ok => Mojo::JSON->false, error => 'not found' }, status => 404); }
+    # Placeholder: real implementation calls GitHub/GitLab/Gitea API to list repos
+    $c->render(json => { ok => Mojo::JSON->true, repos => [], message => 'Discovery not yet implemented for this provider.' });
+  };
+%>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Repo Mappings - git-advanced-multisync</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
+  <style>
+    :root { --brand-dark: #0f2b46; --brand-accent: #1a73e8; }
+    .navbar { background-color: var(--brand-dark) !important; }
+    .navbar-brand { font-weight: 700; letter-spacing: -0.5px; }
+    .navbar-brand .bi { color: #4dabf7; }
+    footer { color: #6c757d; font-size: 0.85rem; }
+    .filter-bar { background: #fff; border: 1px solid #dee2e6; border-radius: 0.375rem; padding: 1rem; }
+  </style>
+</head>
+<body class="bg-light">
+
+  <!-- Navigation -->
+  <nav class="navbar navbar-expand-lg navbar-dark">
+    <div class="container-fluid">
+      <a class="navbar-brand" href="/"><i class="bi bi-arrow-repeat"></i> git-advanced-multisync</a>
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#mainNav">
+        <span class="navbar-toggler-icon"></span>
+      </button>
+      <div class="collapse navbar-collapse" id="mainNav">
+        <ul class="navbar-nav me-auto">
+          <li class="nav-item"><a class="nav-link" href="/">Dashboard</a></li>
+          <li class="nav-item"><a class="nav-link" href="/providers">Providers</a></li>
+          <li class="nav-item"><a class="nav-link" href="/profiles">Profiles</a></li>
+          <li class="nav-item"><a class="nav-link active" href="/mappings">Mappings</a></li>
+          <li class="nav-item"><a class="nav-link" href="/jobs">Jobs</a></li>
+        </ul>
+        <ul class="navbar-nav">
+          <li class="nav-item">
+            <a class="nav-link" href="#" data-bs-toggle="modal" data-bs-target="#helpModal">
+              <i class="bi bi-question-circle"></i> Help
+            </a>
+          </li>
+        </ul>
+        <span class="navbar-text text-light opacity-75">DEC-LLC</span>
+      </div>
+    </div>
+  </nav>
+
+  <div class="container-fluid py-4">
+
+    <div class="d-flex justify-content-between align-items-center mb-4">
+      <h2 class="mb-0">Repo Mappings</h2>
+      <div class="btn-group">
+        <button class="btn btn-outline-info" data-bs-toggle="modal" data-bs-target="#discoverModal">
+          <i class="bi bi-search"></i> Auto-Discover
+        </button>
+        <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#mappingModal" onclick="openAddMapping()">
+          <i class="bi bi-plus-circle"></i> Add Manual Mapping
+        </button>
+      </div>
+    </div>
+
+    <!-- Alert area -->
+    <div id="alertArea"></div>
+
+    <!-- Filter by profile -->
+    <div class="filter-bar mb-3">
+      <div class="row align-items-center">
+        <div class="col-auto">
+          <label class="form-label mb-0"><strong>Filter by Profile:</strong></label>
+        </div>
+        <div class="col-md-4">
+          <select class="form-select form-select-sm" id="filterProfile" onchange="filterMappings()">
+            <option value="">All Profiles</option>
+            % for my $pr (@{$profiles}) {
+              <option value="<%= $pr->{id} %>"><%= $pr->{name} %></option>
+            % }
+          </select>
+        </div>
+        <div class="col-auto">
+          <span class="text-muted" id="mappingCount"><%= scalar @{$mappings} %> mapping(s)</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Mappings Table -->
+    <div class="card">
+      <div class="card-body p-0">
+        <table class="table table-striped table-hover mb-0">
+          <thead class="table-light">
+            <tr>
+              <th>ID</th>
+              <th>Profile</th>
+              <th>Source</th>
+              <th></th>
+              <th>Target</th>
+              <th>Direction</th>
+              <th>Enabled</th>
+              <th class="text-end">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="mappingsBody">
+            % if (@{$mappings}) {
+              % for my $m (@{$mappings}) {
+              <tr class="mapping-row" data-profile-id="<%= $m->{profile_id} // '' %>">
+                <td><%= $m->{id} %></td>
+                <td><small class="text-muted"><%= $m->{profile_name} // 'Unassigned' %></small></td>
+                <td>
+                  <span class="badge bg-secondary"><%= $m->{source_provider} %></span>
+                  <br><code><%= $m->{source_full_path} %></code>
+                </td>
+                <td class="text-center">
+                  % my $dir = $m->{direction} // '';
+                  % if ($dir =~ /bidirectional/) {
+                    <i class="bi bi-arrow-left-right text-primary"></i>
+                  % } else {
+                    <i class="bi bi-arrow-right text-primary"></i>
+                  % }
+                </td>
+                <td>
+                  <span class="badge bg-secondary"><%= $m->{target_provider} %></span>
+                  <br><code><%= $m->{target_full_path} %></code>
+                </td>
+                <td><small><%= $dir %></small></td>
+                <td>
+                  % if ($m->{enabled}) {
+                    <button class="btn btn-sm btn-success" onclick="toggleMapping(<%= $m->{id} %>, false)" title="Click to disable">
+                      <i class="bi bi-toggle-on"></i>
+                    </button>
+                  % } else {
+                    <button class="btn btn-sm btn-secondary" onclick="toggleMapping(<%= $m->{id} %>, true)" title="Click to enable">
+                      <i class="bi bi-toggle-off"></i>
+                    </button>
+                  % }
+                </td>
+                <td class="text-end">
+                  <button class="btn btn-sm btn-outline-danger" onclick="deleteMapping(<%= $m->{id} %>)" title="Delete">
+                    <i class="bi bi-trash"></i>
+                  </button>
+                </td>
+              </tr>
+              % }
+            % } else {
+              <tr id="emptyRow"><td colspan="8" class="text-center text-muted py-4">No repo mappings yet. Use "Auto-Discover" or "Add Manual Mapping" to get started.</td></tr>
+            % }
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div><!-- /container -->
+
+  <!-- Add Manual Mapping Modal -->
+  <div class="modal fade" id="mappingModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Add Manual Mapping</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <form id="mappingForm" novalidate>
+          <div class="mb-3">
+            <label class="form-label">Profile</label>
+            <select class="form-select" id="mappingProfile">
+              <option value="">-- none (unassigned) --</option>
+              % for my $pr (@{$profiles}) {
+                <option value="<%= $pr->{id} %>"><%= $pr->{name} %></option>
+              % }
+            </select>
+            <div class="form-text text-muted">Optionally assign this mapping to a sync profile. Unassigned mappings must be synced manually.</div>
+          </div>
+
+          <div class="row mb-3">
+            <div class="col-md-3">
+              <label class="form-label">Source Provider <span class="text-danger">*</span></label>
+              <select class="form-select" id="mappingSourceProvider" required>
+                <option value="github">GitHub</option>
+                <option value="gitlab">GitLab</option>
+                <option value="gitea">Gitea</option>
+              </select>
+              <div class="form-text text-muted">Platform where the source repo lives.</div>
+            </div>
+            <div class="col-md-9">
+              <label class="form-label">Source Repo Path <span class="text-danger">*</span></label>
+              <input type="text" class="form-control" id="mappingSourcePath" placeholder="e.g., my-org/my-repo" required pattern="[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+" minlength="3">
+              <div class="form-text text-muted">Full path in <code>owner/repo-name</code> format, e.g. <code>DEC-LLC/my-project</code></div>
+              <div class="invalid-feedback">Please enter a valid repo path in owner/repo format.</div>
+            </div>
+          </div>
+
+          <div class="row mb-3">
+            <div class="col-md-3">
+              <label class="form-label">Target Provider <span class="text-danger">*</span></label>
+              <select class="form-select" id="mappingTargetProvider" required>
+                <option value="github">GitHub</option>
+                <option value="gitlab" selected>GitLab</option>
+                <option value="gitea">Gitea</option>
+              </select>
+              <div class="form-text text-muted">Platform where the target repo lives.</div>
+            </div>
+            <div class="col-md-9">
+              <label class="form-label">Target Repo Path <span class="text-danger">*</span></label>
+              <input type="text" class="form-control" id="mappingTargetPath" placeholder="e.g., my-group/my-repo" required pattern="[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+" minlength="3">
+              <div class="form-text text-muted">Full path in <code>owner/repo-name</code> format. Can match source path or differ if renaming.</div>
+              <div class="invalid-feedback">Please enter a valid repo path in owner/repo format.</div>
+            </div>
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label">Direction <span class="text-danger">*</span></label>
+            <select class="form-select" id="mappingDirection" required>
+              <option value="github_to_gitlab">Source &rarr; Target (one-way push)</option>
+              <option value="gitlab_to_github">Target &rarr; Source (one-way pull)</option>
+              <option value="bidirectional">Bidirectional</option>
+            </select>
+            <div class="form-text text-muted">Controls which direction changes flow between the two repos.</div>
+          </div>
+
+          <div class="form-check mb-3">
+            <input class="form-check-input" type="checkbox" id="mappingEnabled" checked>
+            <label class="form-check-label" for="mappingEnabled">Enabled</label>
+            <div class="form-text text-muted">Disabled mappings are skipped during sync operations.</div>
+          </div>
+          </form>
+
+          <div id="mappingModalAlert"></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-primary" onclick="saveMapping()">
+            <i class="bi bi-check-lg"></i> Save Mapping
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Auto-Discover Modal -->
+  <div class="modal fade" id="discoverModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Auto-Discover Repos</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <p class="text-muted">Select a profile. The system will query the source provider and list available repos for mapping.</p>
+
+          <div class="mb-3">
+            <label class="form-label">Profile</label>
+            <select class="form-select" id="discoverProfile" onchange="loadDiscoverProfile()">
+              <option value="">-- select a profile --</option>
+              % for my $pr (@{$profiles}) {
+                <option value="<%= $pr->{id} %>"><%= $pr->{name} %></option>
+              % }
+            </select>
+          </div>
+
+          <div class="mb-3">
+            <button class="btn btn-info" id="btnDiscover" onclick="discoverRepos()" disabled>
+              <i class="bi bi-search"></i> Discover Repos
+            </button>
+          </div>
+
+          <div id="discoverResults" class="d-none">
+            <div class="border rounded p-3 bg-white" style="max-height: 400px; overflow-y: auto;">
+              <div class="form-check mb-2">
+                <input class="form-check-input" type="checkbox" id="selectAllRepos" onchange="toggleAllRepos()">
+                <label class="form-check-label" for="selectAllRepos"><strong>Select All</strong></label>
+              </div>
+              <hr>
+              <div id="repoCheckboxes"></div>
+            </div>
+            <div class="mt-3">
+              <button class="btn btn-primary" onclick="addSelectedMappings()">
+                <i class="bi bi-plus-circle"></i> Add Selected as Mappings
+              </button>
+            </div>
+          </div>
+
+          <div id="discoverAlert"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Delete Confirm Modal -->
+  <div class="modal fade" id="deleteModal" tabindex="-1">
+    <div class="modal-dialog modal-sm">
+      <div class="modal-content">
+        <div class="modal-header bg-danger text-white">
+          <h5 class="modal-title"><i class="bi bi-exclamation-triangle"></i> Confirm Delete</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <p>Are you sure you want to delete mapping <strong id="deleteMappingName"></strong>?</p>
+          <p class="text-muted small">This cannot be undone.</p>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-danger" onclick="confirmDeleteMapping()"><i class="bi bi-trash"></i> Delete</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Help Modal -->
+  <div class="modal fade" id="helpModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="bi bi-question-circle"></i> Quick Reference</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <h6>What are Repo Mappings?</h6>
+          <p>A repo mapping connects a specific source repository to a specific target repository. When a sync runs, each enabled mapping is processed &mdash; cloning from source and pushing to target.</p>
+          <h6>Manual vs. Auto-Discovered</h6>
+          <ul>
+            <li><strong>Manual Mapping:</strong> You specify both the source and target repo paths by hand.</li>
+            <li><strong>Auto-Discover:</strong> Select a profile, and the system queries the source provider API to list all available repos. You then pick which ones to sync.</li>
+          </ul>
+          <h6>Repo Path Format</h6>
+          <p>Repo paths use the <code>owner/repo-name</code> format. Examples:</p>
+          <ul>
+            <li><code>DEC-LLC/my-project</code></li>
+            <li><code>my-username/dotfiles</code></li>
+            <li><code>my-group/subgroup/repo</code> (GitLab nested groups)</li>
+          </ul>
+          <h6>Sync Directions</h6>
+          <ul>
+            <li><strong>Source &rarr; Target:</strong> One-way push from source to target.</li>
+            <li><strong>Target &rarr; Source:</strong> One-way pull from target to source.</li>
+            <li><strong>Bidirectional:</strong> Sync changes both ways.</li>
+          </ul>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer class="text-center py-3">
+    git-advanced-multisync &mdash; DEC-LLC
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+  <script>
+    function clearValidation() {
+      var form = document.getElementById('mappingForm');
+      if (form) {
+        form.classList.remove('was-validated');
+        form.querySelectorAll('.is-invalid').forEach(function(el) { el.classList.remove('is-invalid'); });
+      }
+    }
+
+    function openAddMapping() {
+      document.getElementById('mappingSourcePath').value = '';
+      document.getElementById('mappingTargetPath').value = '';
+      document.getElementById('mappingEnabled').checked = true;
+      document.getElementById('mappingModalAlert').innerHTML = '';
+      clearValidation();
+    }
+
+    function saveMapping() {
+      var form = document.getElementById('mappingForm');
+
+      // Run Bootstrap validation
+      if (!form.checkValidity()) {
+        form.classList.add('was-validated');
+        return;
+      }
+
+      var data = {
+        source_provider: document.getElementById('mappingSourceProvider').value,
+        source_full_path: document.getElementById('mappingSourcePath').value.trim(),
+        target_provider: document.getElementById('mappingTargetProvider').value,
+        target_full_path: document.getElementById('mappingTargetPath').value.trim(),
+        direction: document.getElementById('mappingDirection').value,
+        enabled: document.getElementById('mappingEnabled').checked,
+        profile_id: parseInt(document.getElementById('mappingProfile').value) || null
+      };
+
+      fetch('/api/mappings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data)
+      })
+      .then(function(r) { return r.json(); })
+      .then(function(result) {
+        if (!result.error) {
+          bootstrap.Modal.getInstance(document.getElementById('mappingModal')).hide();
+          showAlert('Mapping created.', 'success');
+          setTimeout(function() { location.reload(); }, 1000);
+        } else {
+          document.getElementById('mappingModalAlert').innerHTML = '<div class="alert alert-danger py-2">' + (result.error || 'Save failed.') + '</div>';
+        }
+      })
+      .catch(function(err) {
+        document.getElementById('mappingModalAlert').innerHTML = '<div class="alert alert-danger py-2">Error: ' + err.message + '</div>';
+      });
+    }
+
+    function toggleMapping(id, enabled) {
+      fetch('/api/mappings/' + id, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: enabled })
+      })
+      .then(function(r) { return r.json(); })
+      .then(function(result) {
+        if (!result.error) {
+          showAlert('Mapping ' + (enabled ? 'enabled' : 'disabled') + '.', 'success');
+          setTimeout(function() { location.reload(); }, 800);
+        }
+      })
+      .catch(function(err) { showAlert('Error: ' + err.message, 'danger'); });
+    }
+
+    var deleteMappingTargetId = null;
+    function deleteMapping(id) {
+      deleteMappingTargetId = id;
+      document.getElementById('deleteMappingName').textContent = '#' + id;
+      new bootstrap.Modal(document.getElementById('deleteModal')).show();
+    }
+
+    function confirmDeleteMapping() {
+      if (!deleteMappingTargetId) return;
+      fetch('/api/mappings/' + deleteMappingTargetId, { method: 'DELETE' })
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+          bootstrap.Modal.getInstance(document.getElementById('deleteModal')).hide();
+          showAlert('Mapping deleted.', 'success');
+          setTimeout(function() { location.reload(); }, 800);
+        })
+        .catch(function(err) { showAlert('Error: ' + err.message, 'danger'); });
+    }
+
+    function filterMappings() {
+      var profileId = document.getElementById('filterProfile').value;
+      var rows = document.querySelectorAll('.mapping-row');
+      var visible = 0;
+      rows.forEach(function(row) {
+        if (!profileId || row.dataset.profileId === profileId) {
+          row.style.display = '';
+          visible++;
+        } else {
+          row.style.display = 'none';
+        }
+      });
+      document.getElementById('mappingCount').textContent = visible + ' mapping(s)';
+    }
+
+    // Auto-discover
+    function loadDiscoverProfile() {
+      var val = document.getElementById('discoverProfile').value;
+      document.getElementById('btnDiscover').disabled = !val;
+      document.getElementById('discoverResults').classList.add('d-none');
+    }
+
+    function discoverRepos() {
+      var profileId = document.getElementById('discoverProfile').value;
+      if (!profileId) return;
+
+      document.getElementById('btnDiscover').disabled = true;
+      document.getElementById('btnDiscover').innerHTML = '<span class="spinner-border spinner-border-sm"></span> Discovering...';
+      document.getElementById('discoverAlert').innerHTML = '';
+
+      // In a real implementation, this would call the provider API
+      // For now we call a placeholder endpoint
+      fetch('/api/providers/' + profileId + '/repos')
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+          if (result.repos && result.repos.length > 0) {
+            var html = '';
+            result.repos.forEach(function(repo) {
+              html += '<div class="form-check mb-1">' +
+                '<input class="form-check-input repo-checkbox" type="checkbox" value="' + repo.full_name + '">' +
+                '<label class="form-check-label"><code>' + repo.full_name + '</code></label>' +
+                '</div>';
+            });
+            document.getElementById('repoCheckboxes').innerHTML = html;
+            document.getElementById('discoverResults').classList.remove('d-none');
+          } else {
+            document.getElementById('discoverAlert').innerHTML =
+              '<div class="alert alert-info mt-3">' + (result.message || 'No repos found.') + '</div>';
+            document.getElementById('discoverResults').classList.add('d-none');
+          }
+        })
+        .catch(function(err) {
+          document.getElementById('discoverAlert').innerHTML =
+            '<div class="alert alert-danger mt-3">Error: ' + err.message + '</div>';
+        })
+        .finally(function() {
+          document.getElementById('btnDiscover').disabled = false;
+          document.getElementById('btnDiscover').innerHTML = '<i class="bi bi-search"></i> Discover Repos';
+        });
+    }
+
+    function toggleAllRepos() {
+      var checked = document.getElementById('selectAllRepos').checked;
+      document.querySelectorAll('.repo-checkbox').forEach(function(cb) { cb.checked = checked; });
+    }
+
+    function addSelectedMappings() {
+      var selected = [];
+      document.querySelectorAll('.repo-checkbox:checked').forEach(function(cb) {
+        selected.push(cb.value);
+      });
+      if (!selected.length) {
+        document.getElementById('discoverAlert').innerHTML =
+          '<div class="alert alert-warning mt-3">Select at least one repo.</div>';
+        return;
+      }
+      // For each selected repo, create a mapping with matching source/target path
+      // The actual provider info would come from the profile
+      var profileId = document.getElementById('discoverProfile').value;
+      Promise.all(selected.map(function(repoPath) {
+        return fetch('/api/mappings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            source_provider: 'github',
+            source_full_path: repoPath,
+            target_provider: 'gitlab',
+            target_full_path: repoPath,
+            direction: 'github_to_gitlab',
+            enabled: true,
+            profile_id: parseInt(profileId) || null
+          })
+        }).then(function(r) { return r.json(); });
+      }))
+      .then(function(results) {
+        bootstrap.Modal.getInstance(document.getElementById('discoverModal')).hide();
+        showAlert('Added ' + results.length + ' mapping(s).', 'success');
+        setTimeout(function() { location.reload(); }, 1000);
+      })
+      .catch(function(err) {
+        document.getElementById('discoverAlert').innerHTML =
+          '<div class="alert alert-danger mt-3">Error: ' + err.message + '</div>';
+      });
+    }
+
+    function showAlert(msg, type) {
+      var area = document.getElementById('alertArea');
+      area.innerHTML = '<div class="alert alert-' + type + ' alert-dismissible fade show">' +
+        msg + '<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>';
+      setTimeout(function() { area.innerHTML = ''; }, 5000);
+    }
+  </script>
+</body>
+</html>

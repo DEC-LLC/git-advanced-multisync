@@ -1,0 +1,353 @@
+<%# Route for App.pm:
+  get '/jobs' => sub ($c) {
+    my $jobs = $c->dbh->selectall_arrayref(
+      q{SELECT sj.*, sp.name as profile_name
+        FROM sync_jobs sj
+        LEFT JOIN sync_profiles sp ON sj.profile_id = sp.id
+        ORDER BY sj.id DESC LIMIT 50}, { Slice => {} });
+    $c->stash(jobs => $jobs);
+    $c->render(template => 'jobs');
+  };
+
+  # API routes needed (add if not present):
+  get '/api/jobs/:id/events' => sub ($c) {
+    my $id = $c->param('id');
+    my $events = $c->dbh->selectall_arrayref(
+      q{SELECT * FROM sync_job_events WHERE job_id = ? ORDER BY event_at ASC}, { Slice => {} }, $id);
+    $c->render(json => $events);
+  };
+%>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sync Jobs - git-advanced-multisync</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
+  <style>
+    :root { --brand-dark: #0f2b46; --brand-accent: #1a73e8; }
+    .navbar { background-color: var(--brand-dark) !important; }
+    .navbar-brand { font-weight: 700; letter-spacing: -0.5px; }
+    .navbar-brand .bi { color: #4dabf7; }
+    .badge-queued { background: #6c757d; }
+    .badge-running { background: #0d6efd; }
+    .badge-success { background: #198754; }
+    .badge-failed { background: #dc3545; }
+    .badge-stopped { background: #ffc107; color: #000; }
+    .event-log { font-family: monospace; font-size: 0.85rem; max-height: 300px; overflow-y: auto; background: #1e1e1e; color: #d4d4d4; padding: 0.75rem; border-radius: 0.375rem; }
+    .event-log .event-info { color: #9cdcfe; }
+    .event-log .event-warn { color: #dcdcaa; }
+    .event-log .event-error { color: #f48771; }
+    .event-log .event-time { color: #6a9955; margin-right: 0.5em; }
+    .job-row { cursor: pointer; }
+    .job-row:hover { background: #e9ecef !important; }
+    .job-row.active { background: #cfe2ff !important; }
+    footer { color: #6c757d; font-size: 0.85rem; }
+  </style>
+</head>
+<body class="bg-light">
+
+  <!-- Navigation -->
+  <nav class="navbar navbar-expand-lg navbar-dark">
+    <div class="container-fluid">
+      <a class="navbar-brand" href="/"><i class="bi bi-arrow-repeat"></i> git-advanced-multisync</a>
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#mainNav">
+        <span class="navbar-toggler-icon"></span>
+      </button>
+      <div class="collapse navbar-collapse" id="mainNav">
+        <ul class="navbar-nav me-auto">
+          <li class="nav-item"><a class="nav-link" href="/">Dashboard</a></li>
+          <li class="nav-item"><a class="nav-link" href="/providers">Providers</a></li>
+          <li class="nav-item"><a class="nav-link" href="/profiles">Profiles</a></li>
+          <li class="nav-item"><a class="nav-link" href="/mappings">Mappings</a></li>
+          <li class="nav-item"><a class="nav-link active" href="/jobs">Jobs</a></li>
+        </ul>
+        <ul class="navbar-nav">
+          <li class="nav-item">
+            <a class="nav-link" href="#" data-bs-toggle="modal" data-bs-target="#helpModal">
+              <i class="bi bi-question-circle"></i> Help
+            </a>
+          </li>
+        </ul>
+        <span class="navbar-text text-light opacity-75">DEC-LLC</span>
+      </div>
+    </div>
+  </nav>
+
+  <div class="container-fluid py-4">
+
+    <div class="d-flex justify-content-between align-items-center mb-4">
+      <h2 class="mb-0">Sync Jobs</h2>
+      <button class="btn btn-outline-secondary" onclick="location.reload()">
+        <i class="bi bi-arrow-clockwise"></i> Refresh
+      </button>
+    </div>
+
+    <!-- Alert area -->
+    <div id="alertArea"></div>
+
+    <div class="row g-4">
+
+      <!-- Jobs Table -->
+      <div class="col-lg-7">
+        <div class="card">
+          <div class="card-header"><strong>Recent Jobs</strong> <small class="text-muted">(last 50)</small></div>
+          <div class="card-body p-0">
+            <table class="table table-hover mb-0">
+              <thead class="table-light">
+                <tr>
+                  <th>ID</th>
+                  <th>Profile</th>
+                  <th>Status</th>
+                  <th>Started</th>
+                  <th>Finished</th>
+                  <th>Message</th>
+                  <th class="text-end">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                % if (@{$jobs}) {
+                  % for my $j (@{$jobs}) {
+                  <tr class="job-row" data-job-id="<%= $j->{id} %>" onclick="selectJob(<%= $j->{id} %>)">
+                    <td><%= $j->{id} %></td>
+                    <td><%= $j->{profile_name} // 'Unknown' %></td>
+                    <td>
+                      % my $status = $j->{status} // 'unknown';
+                      <span class="badge badge-<%= $status %>"><%= $status %></span>
+                    </td>
+                    <td><small><%= $j->{started_at} // '--' %></small></td>
+                    <td><small><%= $j->{finished_at} // '--' %></small></td>
+                    <td><small class="text-muted"><%= $j->{message} // '' %></small></td>
+                    <td class="text-end">
+                      % if ($status eq 'queued' || $status eq 'running') {
+                        <button class="btn btn-sm btn-outline-warning" onclick="event.stopPropagation(); stopJob(<%= $j->{id} %>)" title="Stop">
+                          <i class="bi bi-stop-circle"></i>
+                        </button>
+                      % }
+                      % if ($status eq 'failed' || $status eq 'stopped') {
+                        <button class="btn btn-sm btn-outline-success" onclick="event.stopPropagation(); retryJob(<%= $j->{profile_id} %>)" title="Retry">
+                          <i class="bi bi-arrow-repeat"></i>
+                        </button>
+                      % }
+                    </td>
+                  </tr>
+                  % }
+                % } else {
+                  <tr><td colspan="7" class="text-center text-muted py-4">No sync jobs yet. Go to <a href="/profiles">Profiles</a> and run a sync.</td></tr>
+                % }
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Event Log Panel -->
+      <div class="col-lg-5">
+        <div class="card">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <strong>Job Events</strong>
+            <span class="text-muted" id="eventJobLabel">Select a job to view events</span>
+          </div>
+          <div class="card-body">
+            <div id="eventLogPlaceholder" class="text-center text-muted py-5">
+              <i class="bi bi-journal-text" style="font-size: 2rem;"></i>
+              <p class="mt-2">Click a job row to load its event log.</p>
+            </div>
+            <div id="eventLogContainer" class="d-none">
+              <div class="event-log" id="eventLog"></div>
+            </div>
+            <div id="eventLogEmpty" class="d-none text-center text-muted py-4">
+              <p>No events recorded for this job.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /row -->
+
+  </div><!-- /container -->
+
+  <!-- Stop Job Confirm Modal -->
+  <div class="modal fade" id="stopJobModal" tabindex="-1">
+    <div class="modal-dialog modal-sm">
+      <div class="modal-content">
+        <div class="modal-header bg-warning">
+          <h5 class="modal-title"><i class="bi bi-stop-circle"></i> Confirm Stop</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <p>Stop job <strong id="stopJobName"></strong>?</p>
+          <p class="text-muted small">The job will be marked as stopped. Any in-progress repo sync may complete before the job halts.</p>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-warning" onclick="confirmStopJob()"><i class="bi bi-stop-circle"></i> Stop</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Retry Job Confirm Modal -->
+  <div class="modal fade" id="retryJobModal" tabindex="-1">
+    <div class="modal-dialog modal-sm">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="bi bi-arrow-repeat"></i> Confirm Retry</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <p>Queue a new sync job for this profile?</p>
+          <p class="text-muted small">This will clone from source and push to target according to the configured direction and conflict policy.</p>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-success" onclick="confirmRetryJob()"><i class="bi bi-arrow-repeat"></i> Retry</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Help Modal -->
+  <div class="modal fade" id="helpModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="bi bi-question-circle"></i> Quick Reference</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <h6>Job Statuses</h6>
+          <ul>
+            <li><span class="badge badge-queued">queued</span> &mdash; Job is waiting to be picked up by the sync worker.</li>
+            <li><span class="badge badge-running">running</span> &mdash; Job is currently cloning/pushing repos.</li>
+            <li><span class="badge badge-success">success</span> &mdash; All repos synced successfully.</li>
+            <li><span class="badge badge-failed">failed</span> &mdash; Sync encountered an error. Check the event log for details.</li>
+            <li><span class="badge badge-stopped">stopped</span> &mdash; Job was manually stopped before completion.</li>
+          </ul>
+          <h6>Event Log</h6>
+          <p>Click any job row to view its event log on the right. Events show detailed progress including per-repo clone/push status, errors, and timing.</p>
+          <h6>Actions</h6>
+          <ul>
+            <li><strong>Stop</strong> &mdash; Cancel a running or queued job.</li>
+            <li><strong>Retry</strong> &mdash; Queue a new sync job for the same profile (available on failed/stopped jobs).</li>
+          </ul>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer class="text-center py-3">
+    git-advanced-multisync &mdash; DEC-LLC
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+  <script>
+    var selectedJobId = null;
+
+    function selectJob(jobId) {
+      selectedJobId = jobId;
+
+      // Highlight selected row
+      document.querySelectorAll('.job-row').forEach(function(r) { r.classList.remove('active'); });
+      var row = document.querySelector('[data-job-id="' + jobId + '"]');
+      if (row) row.classList.add('active');
+
+      document.getElementById('eventJobLabel').textContent = 'Job #' + jobId;
+      document.getElementById('eventLogPlaceholder').classList.add('d-none');
+      document.getElementById('eventLogContainer').classList.add('d-none');
+      document.getElementById('eventLogEmpty').classList.add('d-none');
+
+      // Fetch events
+      fetch('/api/jobs/' + jobId + '/events')
+        .then(function(r) { return r.json(); })
+        .then(function(events) {
+          if (events.length === 0) {
+            document.getElementById('eventLogEmpty').classList.remove('d-none');
+            return;
+          }
+
+          var html = '';
+          events.forEach(function(ev) {
+            var levelClass = 'event-' + ev.level;
+            var time = ev.event_at ? ev.event_at.replace('T', ' ').substring(0, 19) : '';
+            html += '<div><span class="event-time">[' + time + ']</span>' +
+              '<span class="' + levelClass + '">[' + ev.level.toUpperCase() + ']</span> ' +
+              escapeHtml(ev.message) + '</div>';
+          });
+
+          document.getElementById('eventLog').innerHTML = html;
+          document.getElementById('eventLogContainer').classList.remove('d-none');
+
+          // Auto-scroll to bottom
+          var logEl = document.getElementById('eventLog');
+          logEl.scrollTop = logEl.scrollHeight;
+        })
+        .catch(function(err) {
+          showAlert('Failed to load events: ' + err.message, 'danger');
+        });
+    }
+
+    var stopTargetJobId = null;
+    function stopJob(jobId) {
+      stopTargetJobId = jobId;
+      document.getElementById('stopJobName').textContent = '#' + jobId;
+      new bootstrap.Modal(document.getElementById('stopJobModal')).show();
+    }
+
+    function confirmStopJob() {
+      if (!stopTargetJobId) return;
+      bootstrap.Modal.getInstance(document.getElementById('stopJobModal')).hide();
+      fetch('/api/sync/stop/' + stopTargetJobId, { method: 'POST' })
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+          if (!result.error) {
+            showAlert('Job #' + stopTargetJobId + ' stopped.', 'success');
+            setTimeout(function() { location.reload(); }, 1000);
+          } else {
+            showAlert('Failed to stop job.', 'danger');
+          }
+        })
+        .catch(function(err) { showAlert('Error: ' + err.message, 'danger'); });
+    }
+
+    var retryTargetProfileId = null;
+    function retryJob(profileId) {
+      retryTargetProfileId = profileId;
+      new bootstrap.Modal(document.getElementById('retryJobModal')).show();
+    }
+
+    function confirmRetryJob() {
+      if (!retryTargetProfileId) return;
+      bootstrap.Modal.getInstance(document.getElementById('retryJobModal')).hide();
+      fetch('/api/sync/start/' + retryTargetProfileId, { method: 'POST' })
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+          if (!result.error) {
+            showAlert('New sync job queued.', 'success');
+            setTimeout(function() { location.reload(); }, 1000);
+          } else {
+            showAlert('Failed to queue sync.', 'danger');
+          }
+        })
+        .catch(function(err) { showAlert('Error: ' + err.message, 'danger'); });
+    }
+
+    function escapeHtml(text) {
+      var div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    function showAlert(msg, type) {
+      var area = document.getElementById('alertArea');
+      area.innerHTML = '<div class="alert alert-' + type + ' alert-dismissible fade show">' +
+        msg + '<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>';
+      setTimeout(function() { area.innerHTML = ''; }, 5000);
+    }
+  </script>
+</body>
+</html>

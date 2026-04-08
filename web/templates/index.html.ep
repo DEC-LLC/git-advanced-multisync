@@ -63,6 +63,13 @@
           <li class="nav-item"><a class="nav-link" href="/mappings">Mappings</a></li>
           <li class="nav-item"><a class="nav-link" href="/jobs">Jobs</a></li>
         </ul>
+        <ul class="navbar-nav">
+          <li class="nav-item">
+            <a class="nav-link" href="#" data-bs-toggle="modal" data-bs-target="#helpModal">
+              <i class="bi bi-question-circle"></i> Help
+            </a>
+          </li>
+        </ul>
         <span class="navbar-text text-light opacity-75">DEC-LLC</span>
       </div>
     </div>
@@ -88,7 +95,7 @@
             <div class="text-muted small text-uppercase">Providers</div>
             <div class="stat-number"><%= scalar @{$providers} %></div>
             <div class="text-muted">
-              % my $ok_count = grep { $_->{test_status} eq 'ok' } @{$providers};
+              % my $ok_count = grep { ($_->{test_status} // '') eq 'ok' } @{$providers};
               <span class="status-dot ok"></span> <%= $ok_count %> connected
             </div>
           </div>
@@ -239,7 +246,110 @@
 
     </div><!-- /row -->
 
+    % if (scalar @{$providers} == 0) {
+    <!-- Getting Started -->
+    <div class="card mt-4" id="getting-started">
+      <div class="card-header bg-white">
+        <h5 class="mb-0"><i class="bi bi-rocket-takeoff"></i> Getting Started</h5>
+      </div>
+      <div class="card-body">
+        <div class="row">
+          <div class="col-md-6">
+            <h6>Quick Setup (3 steps)</h6>
+            <ol>
+              <li><strong>Add Providers</strong> &mdash; Connect your GitHub, GitLab, or Gitea instances</li>
+              <li><strong>Create a Profile</strong> &mdash; Define which orgs to sync between</li>
+              <li><strong>Map Repos &amp; Sync</strong> &mdash; Select repos and run your first sync</li>
+            </ol>
+            <a href="/providers" class="btn btn-primary"><i class="bi bi-cloud-plus"></i> Start by Adding a Provider</a>
+          </div>
+          <div class="col-md-6">
+            <h6>Example: Mirror GitLab to GitHub</h6>
+            <div class="bg-light p-3 rounded" style="font-size:0.9rem;">
+              <p class="mb-1"><strong>1.</strong> Add provider "My GitLab" (type: GitLab, URL: https://gitlab.example.com, token: glpat-xxx)</p>
+              <p class="mb-1"><strong>2.</strong> Add provider "GitHub" (type: GitHub, token: ghp_xxx)</p>
+              <p class="mb-1"><strong>3.</strong> Create profile "gitlab-to-github" (source: My GitLab / my-org &rarr; target: GitHub / my-org)</p>
+              <p class="mb-0"><strong>4.</strong> Auto-discover repos, select which to sync, click "Sync Now"</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    % }
+
   </div><!-- /container -->
+
+  <!-- Sync All Confirm Modal -->
+  <div class="modal fade" id="syncAllConfirmModal" tabindex="-1">
+    <div class="modal-dialog modal-sm">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="bi bi-arrow-repeat"></i> Confirm Sync All</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <p>Run sync for <strong>all enabled profiles</strong>?</p>
+          <p class="text-muted small">This will clone from source and push to target for every enabled sync profile.</p>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-primary" onclick="confirmSyncAll()"><i class="bi bi-arrow-repeat"></i> Sync All</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Help Modal -->
+  <div class="modal fade" id="helpModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="bi bi-question-circle"></i> Quick Reference</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <h6>Supported Providers</h6>
+          <ul>
+            <li><strong>GitHub</strong> &mdash; GitHub.com or GitHub Enterprise. Default API: <code>https://api.github.com</code></li>
+            <li><strong>GitLab</strong> &mdash; GitLab.com or self-hosted. Default API: <code>https://gitlab.com</code></li>
+            <li><strong>Gitea</strong> &mdash; Self-hosted Gitea instances. No default URL (must be specified).</li>
+          </ul>
+          <h6>How to Generate Tokens</h6>
+          <table class="table table-sm">
+            <thead><tr><th>Provider</th><th>Where</th><th>Scopes Needed</th></tr></thead>
+            <tbody>
+              <tr><td>GitHub</td><td>Settings &rarr; Developer Settings &rarr; Personal Access Tokens</td><td><code>repo</code>, <code>read:org</code></td></tr>
+              <tr><td>GitLab</td><td>Preferences &rarr; Access Tokens</td><td><code>api</code>, <code>read_repository</code>, <code>write_repository</code></td></tr>
+              <tr><td>Gitea</td><td>Settings &rarr; Applications</td><td>All scopes</td></tr>
+            </tbody>
+          </table>
+          <h6>Sync Directions</h6>
+          <ul>
+            <li><strong>Source &rarr; Target:</strong> One-way push. Changes in source are pushed to target.</li>
+            <li><strong>Target &rarr; Source:</strong> One-way pull. Changes in target are pulled to source.</li>
+            <li><strong>Bidirectional:</strong> Sync changes both ways between source and target.</li>
+          </ul>
+          <h6>Conflict Policies</h6>
+          <ul>
+            <li><strong>ff-only:</strong> Safe mode. Only syncs if target has not diverged (fast-forward merge). Rejects if conflicts exist.</li>
+            <li><strong>force-push:</strong> Overwrites target with source. Use with caution &mdash; target changes will be lost.</li>
+            <li><strong>reject:</strong> Log the conflict but don't sync. Useful for monitoring drift without taking action.</li>
+          </ul>
+          <h6>Workflow</h6>
+          <ol>
+            <li>Add providers (GitHub, GitLab, Gitea instances)</li>
+            <li>Create sync profiles defining source/target orgs and direction</li>
+            <li>Map repos (manually or via auto-discovery)</li>
+            <li>Run sync from the Dashboard or Profiles page</li>
+            <li>Check job status on the Jobs page</li>
+          </ol>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <footer class="text-center py-3">
     git-advanced-multisync &mdash; DEC-LLC
@@ -248,18 +358,24 @@
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
   <script>
     function syncAll() {
-      const btn = document.getElementById('btnSyncAll');
-      btn.disabled = true;
-      btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Starting...';
-
       // Queue a sync for every enabled profile
       const profiles = <%= Mojo::JSON::encode_json([map { $_->{id} } grep { $_->{enabled} } @{$profiles}]) %>;
       if (!profiles.length) {
         showAlert('No enabled profiles to sync.', 'warning');
-        btn.disabled = false;
-        btn.innerHTML = '<i class="bi bi-arrow-repeat"></i> Sync Now';
         return;
       }
+      // Show confirmation modal
+      new bootstrap.Modal(document.getElementById('syncAllConfirmModal')).show();
+    }
+
+    function confirmSyncAll() {
+      bootstrap.Modal.getInstance(document.getElementById('syncAllConfirmModal')).hide();
+
+      const btn = document.getElementById('btnSyncAll');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Starting...';
+
+      const profiles = <%= Mojo::JSON::encode_json([map { $_->{id} } grep { $_->{enabled} } @{$profiles}]) %>;
 
       Promise.all(profiles.map(id =>
         fetch('/api/sync/start/' + id, { method: 'POST' }).then(r => r.json())

@@ -494,12 +494,40 @@ sub start {
     $c->render(json => $job);
   };
 
-  # ── Minimal UI ─────────────────────────────────────────────────────
+  # ── Web UI Pages ───────────────────────────────────────────────────
+
   get '/' => sub ($c) {
-    my $profiles = $c->dbh->selectall_arrayref(q{SELECT id, name, direction, enabled FROM sync_profiles ORDER BY id}, { Slice => {} });
-    my $mappings = $c->dbh->selectall_arrayref(q{SELECT id, source_full_path, target_full_path, direction, enabled FROM repo_mappings ORDER BY id DESC LIMIT 50}, { Slice => {} });
-    $c->stash(profiles => $profiles, mappings => $mappings);
+    my $providers = $c->dbh->selectall_arrayref(q{SELECT * FROM providers ORDER BY id}, { Slice => {} });
+    my $profiles = $c->dbh->selectall_arrayref(q{SELECT sp.*, s.name as source_name, t.name as target_name FROM sync_profiles sp LEFT JOIN providers s ON sp.source_provider_id = s.id LEFT JOIN providers t ON sp.target_provider_id = t.id ORDER BY sp.id}, { Slice => {} });
+    my $jobs = $c->dbh->selectall_arrayref(q{SELECT sj.*, sp.name as profile_name FROM sync_jobs sj LEFT JOIN sync_profiles sp ON sj.profile_id = sp.id ORDER BY sj.id DESC LIMIT 10}, { Slice => {} });
+    $c->stash(providers => $providers, profiles => $profiles, jobs => $jobs);
     $c->render(template => 'index');
+  };
+
+  get '/providers' => sub ($c) {
+    my $providers = $c->dbh->selectall_arrayref(q{SELECT * FROM providers ORDER BY id}, { Slice => {} });
+    $c->stash(providers => $providers);
+    $c->render(template => 'providers');
+  };
+
+  get '/profiles' => sub ($c) {
+    my $profiles = $c->dbh->selectall_arrayref(q{SELECT sp.*, s.name as source_name, t.name as target_name FROM sync_profiles sp LEFT JOIN providers s ON sp.source_provider_id = s.id LEFT JOIN providers t ON sp.target_provider_id = t.id ORDER BY sp.id}, { Slice => {} });
+    my $providers = $c->dbh->selectall_arrayref(q{SELECT id, name, provider_type FROM providers WHERE enabled ORDER BY name}, { Slice => {} });
+    $c->stash(profiles => $profiles, providers => $providers);
+    $c->render(template => 'profiles');
+  };
+
+  get '/mappings' => sub ($c) {
+    my $profiles = $c->dbh->selectall_arrayref(q{SELECT id, name FROM sync_profiles ORDER BY name}, { Slice => {} });
+    my $mappings = $c->dbh->selectall_arrayref(q{SELECT rm.*, sp.name as profile_name FROM repo_mappings rm LEFT JOIN sync_profiles sp ON rm.profile_id = sp.id ORDER BY rm.id DESC LIMIT 100}, { Slice => {} });
+    $c->stash(profiles => $profiles, mappings => $mappings);
+    $c->render(template => 'mappings');
+  };
+
+  get '/jobs' => sub ($c) {
+    my $jobs = $c->dbh->selectall_arrayref(q{SELECT sj.*, sp.name as profile_name FROM sync_jobs sj LEFT JOIN sync_profiles sp ON sj.profile_id = sp.id ORDER BY sj.id DESC LIMIT 50}, { Slice => {} });
+    $c->stash(jobs => $jobs);
+    $c->render(template => 'jobs');
   };
 
   app->start('daemon', '-l', ($ENV{GITMSYNCD_LISTEN} || 'http://127.0.0.1:9097'));

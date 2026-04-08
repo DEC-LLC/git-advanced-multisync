@@ -86,6 +86,13 @@
           <li class="nav-item"><a class="nav-link" href="/mappings">Mappings</a></li>
           <li class="nav-item"><a class="nav-link" href="/jobs">Jobs</a></li>
         </ul>
+        <ul class="navbar-nav">
+          <li class="nav-item">
+            <a class="nav-link" href="#" data-bs-toggle="modal" data-bs-target="#helpModal">
+              <i class="bi bi-question-circle"></i> Help
+            </a>
+          </li>
+        </ul>
         <span class="navbar-text text-light opacity-75">DEC-LLC</span>
       </div>
     </div>
@@ -129,7 +136,7 @@
                 <td><%= $p->{id} %></td>
                 <td><strong><%= $p->{name} %></strong></td>
                 <td><span class="badge bg-secondary"><%= $p->{provider_type} %></span></td>
-                <td><code><%= $p->{base_url} // '(default)' %></code></td>
+                <td><span class="<%= $p->{test_status} eq 'ok' ? 'text-success' : 'text-muted' %> fw-semibold"><%= $p->{base_url} // '(default)' %></span></td>
                 <td>
                   % my $st = $p->{test_status} // 'untested';
                   % my $dot_class = $st eq 'ok' ? 'ok' : ($st eq 'fail' ? 'fail' : 'untested');
@@ -175,32 +182,51 @@
           <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
         </div>
         <div class="modal-body">
+          <form id="providerForm" novalidate>
           <input type="hidden" id="editProviderId" value="">
           <div class="mb-3">
-            <label class="form-label">Name</label>
-            <input type="text" class="form-control" id="providerName" placeholder="e.g. My GitHub">
+            <label class="form-label">Name <span class="text-danger">*</span></label>
+            <input type="text" class="form-control" id="providerName" placeholder="e.g., My GitLab Server" required pattern="[a-zA-Z0-9 _-]+" minlength="2">
+            <div class="form-text text-muted">A friendly name to identify this provider. Letters, numbers, spaces, hyphens, and underscores only.</div>
+            <div class="invalid-feedback">Please enter a valid name (at least 2 characters, letters/numbers/spaces/hyphens/underscores).</div>
           </div>
           <div class="mb-3">
-            <label class="form-label">Type</label>
-            <select class="form-select" id="providerType" onchange="updateUrlPlaceholder()">
+            <label class="form-label">Type <span class="text-danger">*</span></label>
+            <select class="form-select" id="providerType" required onchange="updateUrlPlaceholder()">
               <option value="github">GitHub</option>
               <option value="gitlab">GitLab</option>
               <option value="gitea">Gitea</option>
             </select>
+            <div class="form-text text-muted">Select the platform type. GitHub, GitLab (self-hosted or cloud), or Gitea.</div>
           </div>
           <div class="mb-3">
-            <label class="form-label">URL <small class="text-muted">(leave blank for default)</small></label>
+            <label class="form-label">URL</label>
             <input type="url" class="form-control" id="providerUrl" placeholder="https://api.github.com">
+            <div class="form-text text-muted">For GitHub.com leave blank. For self-hosted, enter the full URL e.g., <code>https://gitlab.mycompany.com</code></div>
+            <div class="invalid-feedback">Please enter a valid URL (must start with https:// or http://).</div>
           </div>
           <div class="mb-3">
-            <label class="form-label">API Token</label>
-            <input type="password" class="form-control" id="providerToken" placeholder="ghp_... or glpat-...">
-            <div class="form-text" id="tokenHint">Personal access token with repo/project access.</div>
+            <label class="form-label">API Token <span class="text-danger" id="tokenRequired">*</span></label>
+            <input type="password" class="form-control" id="providerToken" placeholder="ghp_... or glpat-..." minlength="10">
+            <div class="form-text text-muted">Personal Access Token with repo/API scope. Generate one from your provider's settings page.</div>
+            <div class="invalid-feedback">Token must be at least 10 characters.</div>
+            <a class="form-text text-primary" style="cursor:pointer;" data-bs-toggle="collapse" href="#tokenHelp" role="button" aria-expanded="false" aria-controls="tokenHelp">
+              <i class="bi bi-key"></i> How do I get a token?
+            </a>
+            <div class="collapse" id="tokenHelp">
+              <div class="card card-body mt-2 bg-light" style="font-size:0.85rem;">
+                <strong>GitHub:</strong> Settings &rarr; Developer Settings &rarr; Personal Access Tokens &rarr; Generate new token (classic). Scopes needed: <code>repo</code>, <code>read:org</code><br>
+                <strong>GitLab:</strong> Preferences &rarr; Access Tokens &rarr; Add new token. Scopes needed: <code>api</code>, <code>read_repository</code>, <code>write_repository</code><br>
+                <strong>Gitea:</strong> Settings &rarr; Applications &rarr; Generate New Token. Select all scopes.
+              </div>
+            </div>
           </div>
           <div class="form-check mb-3">
             <input class="form-check-input" type="checkbox" id="providerEnabled" checked>
             <label class="form-check-label" for="providerEnabled">Enabled</label>
+            <div class="form-text text-muted">Disabled providers are skipped during sync operations.</div>
           </div>
+          </form>
           <div id="modalAlert"></div>
         </div>
         <div class="modal-footer">
@@ -217,17 +243,61 @@
   <div class="modal fade" id="deleteModal" tabindex="-1">
     <div class="modal-dialog modal-sm">
       <div class="modal-content">
-        <div class="modal-header">
-          <h5 class="modal-title">Confirm Delete</h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        <div class="modal-header bg-danger text-white">
+          <h5 class="modal-title"><i class="bi bi-exclamation-triangle"></i> Confirm Delete</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
         </div>
         <div class="modal-body">
-          <p>Delete provider <strong id="deleteProviderName"></strong>?</p>
-          <p class="text-muted small">This cannot be undone. Profiles referencing this provider will lose their association.</p>
+          <p>Are you sure you want to delete <strong id="deleteProviderName"></strong>?</p>
+          <p class="text-muted small">This cannot be undone. Profiles and mappings referencing this provider will lose their association.</p>
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button type="button" class="btn btn-danger" id="btnConfirmDelete" onclick="confirmDelete()">Delete</button>
+          <button type="button" class="btn btn-danger" id="btnConfirmDelete" onclick="confirmDelete()"><i class="bi bi-trash"></i> Delete</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Help Modal -->
+  <div class="modal fade" id="helpModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="bi bi-question-circle"></i> Quick Reference</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <h6>Supported Providers</h6>
+          <ul>
+            <li><strong>GitHub</strong> &mdash; GitHub.com or GitHub Enterprise. Default API: <code>https://api.github.com</code></li>
+            <li><strong>GitLab</strong> &mdash; GitLab.com or self-hosted. Default API: <code>https://gitlab.com</code></li>
+            <li><strong>Gitea</strong> &mdash; Self-hosted Gitea instances. No default URL (must be specified).</li>
+          </ul>
+          <h6>How to Generate Tokens</h6>
+          <table class="table table-sm">
+            <thead><tr><th>Provider</th><th>Where</th><th>Scopes Needed</th></tr></thead>
+            <tbody>
+              <tr><td>GitHub</td><td>Settings &rarr; Developer Settings &rarr; Personal Access Tokens</td><td><code>repo</code>, <code>read:org</code></td></tr>
+              <tr><td>GitLab</td><td>Preferences &rarr; Access Tokens</td><td><code>api</code>, <code>read_repository</code>, <code>write_repository</code></td></tr>
+              <tr><td>Gitea</td><td>Settings &rarr; Applications</td><td>All scopes</td></tr>
+            </tbody>
+          </table>
+          <h6>Sync Directions</h6>
+          <ul>
+            <li><strong>Source &rarr; Target:</strong> One-way push. Changes in source are pushed to target.</li>
+            <li><strong>Target &rarr; Source:</strong> One-way pull. Changes in target are pulled to source.</li>
+            <li><strong>Bidirectional:</strong> Sync changes both ways between source and target.</li>
+          </ul>
+          <h6>Conflict Policies</h6>
+          <ul>
+            <li><strong>ff-only:</strong> Safe mode. Only syncs if target has not diverged (fast-forward merge). Rejects if conflicts exist.</li>
+            <li><strong>force-push:</strong> Overwrites target with source. Use with caution &mdash; target changes will be lost.</li>
+            <li><strong>reject:</strong> Log the conflict but don't sync. Useful for monitoring drift without taking action.</li>
+          </ul>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
         </div>
       </div>
     </div>
@@ -248,6 +318,18 @@
     function updateUrlPlaceholder() {
       const type = document.getElementById('providerType').value;
       document.getElementById('providerUrl').placeholder = urlDefaults[type] || '';
+      // Update URL help text based on type
+      const urlInput = document.getElementById('providerUrl');
+      if (type === 'github') {
+        urlInput.parentElement.querySelector('.form-text').innerHTML =
+          'For GitHub.com leave blank (uses <code>https://api.github.com</code>). For GitHub Enterprise, enter the full URL.';
+      } else if (type === 'gitlab') {
+        urlInput.parentElement.querySelector('.form-text').innerHTML =
+          'For GitLab.com leave blank (uses <code>https://gitlab.com</code>). For self-hosted GitLab, enter the full URL e.g., <code>https://gitlab.mycompany.com</code>';
+      } else if (type === 'gitea') {
+        urlInput.parentElement.querySelector('.form-text').innerHTML =
+          'Gitea requires a URL. Enter the full URL of your Gitea instance e.g., <code>https://gitea.mycompany.com</code>';
+      }
     }
 
     function openAddModal() {
@@ -259,6 +341,9 @@
       document.getElementById('providerToken').value = '';
       document.getElementById('providerEnabled').checked = true;
       document.getElementById('modalAlert').innerHTML = '';
+      document.getElementById('tokenRequired').style.display = '';
+      document.getElementById('providerToken').setAttribute('required', '');
+      clearValidation();
       updateUrlPlaceholder();
     }
 
@@ -270,13 +355,33 @@
       document.getElementById('providerUrl').value = url;
       document.getElementById('providerEnabled').checked = enabled;
       document.getElementById('providerToken').value = '';
+      document.getElementById('providerToken').placeholder = 'Leave blank to keep existing token';
       document.getElementById('modalAlert').innerHTML = '';
+      document.getElementById('tokenRequired').style.display = 'none';
+      document.getElementById('providerToken').removeAttribute('required');
+      clearValidation();
       updateUrlPlaceholder();
       new bootstrap.Modal(document.getElementById('providerModal')).show();
     }
 
+    function clearValidation() {
+      var form = document.getElementById('providerForm');
+      if (form) {
+        form.classList.remove('was-validated');
+        form.querySelectorAll('.is-invalid').forEach(function(el) { el.classList.remove('is-invalid'); });
+      }
+    }
+
     function saveProvider() {
-      const id = document.getElementById('editProviderId').value;
+      var form = document.getElementById('providerForm');
+      var id = document.getElementById('editProviderId').value;
+
+      // Run Bootstrap validation
+      if (!form.checkValidity()) {
+        form.classList.add('was-validated');
+        return;
+      }
+
       const data = {
         name: document.getElementById('providerName').value.trim(),
         provider_type: document.getElementById('providerType').value,
@@ -286,13 +391,14 @@
 
       const token = document.getElementById('providerToken').value.trim();
 
-      if (!data.name) {
-        document.getElementById('modalAlert').innerHTML = '<div class="alert alert-warning py-2">Name is required.</div>';
+      if (!id && !token) {
+        document.getElementById('providerToken').classList.add('is-invalid');
+        document.getElementById('modalAlert').innerHTML = '<div class="alert alert-warning py-2">API Token is required for new providers.</div>';
         return;
       }
 
-      if (!id && !token) {
-        document.getElementById('modalAlert').innerHTML = '<div class="alert alert-warning py-2">API Token is required for new providers.</div>';
+      if (token && token.length < 10) {
+        document.getElementById('providerToken').classList.add('is-invalid');
         return;
       }
 
@@ -306,18 +412,21 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data)
       })
-      .then(r => r.json())
+      .then(r => {
+        if (!r.ok) return r.json().then(j => { throw new Error(j.error || 'Save failed (HTTP ' + r.status + ')'); });
+        return r.json();
+      })
       .then(result => {
-        if (result.ok) {
+        if (result.error) {
+          document.getElementById('modalAlert').innerHTML = '<div class="alert alert-danger py-2">' + result.error + '</div>';
+        } else {
           bootstrap.Modal.getInstance(document.getElementById('providerModal')).hide();
           showAlert((id ? 'Updated' : 'Created') + ' provider "' + data.name + '".', 'success');
           setTimeout(() => location.reload(), 1000);
-        } else {
-          document.getElementById('modalAlert').innerHTML = '<div class="alert alert-danger py-2">' + (result.error || 'Save failed.') + '</div>';
         }
       })
       .catch(err => {
-        document.getElementById('modalAlert').innerHTML = '<div class="alert alert-danger py-2">Error: ' + err.message + '</div>';
+        document.getElementById('modalAlert').innerHTML = '<div class="alert alert-danger py-2">' + err.message + '</div>';
       });
     }
 
@@ -348,10 +457,10 @@
       fetch('/api/providers/' + id + '/test', { method: 'POST' })
         .then(r => r.json())
         .then(result => {
-          if (result.ok) {
-            showAlert('Connection test passed.', 'success');
+          if (result.test_status === 'ok') {
+            showAlert('Connection test passed: ' + (result.message || ''), 'success');
           } else {
-            showAlert('Connection test failed: ' + (result.error || 'unknown error'), 'danger');
+            showAlert('Connection test failed: ' + (result.message || result.error || 'unknown error'), 'danger');
           }
           setTimeout(() => location.reload(), 1500);
         })
@@ -378,7 +487,7 @@
         fetch('/api/providers/' + id + '/test', { method: 'POST' }).then(r => r.json())
       ))
       .then(results => {
-        const ok = results.filter(r => r.ok).length;
+        const ok = results.filter(r => r.test_status === 'ok').length;
         const fail = results.length - ok;
         showAlert('Test complete: ' + ok + ' passed, ' + fail + ' failed.', fail > 0 ? 'warning' : 'success');
         setTimeout(() => location.reload(), 2000);
