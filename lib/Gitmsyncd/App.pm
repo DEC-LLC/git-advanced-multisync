@@ -7,6 +7,7 @@ use FindBin;
 use File::Path qw(make_path rmtree);
 use File::Spec;
 use POSIX qw(strftime);
+use Digest::SHA qw(sha256_hex);
 
 sub start {
   my ($self) = @_;
@@ -25,10 +26,114 @@ sub start {
     return $dbh;
   };
 
-  # ── Health ──────────────────────────────────────────────────────────
+  # ── Session secret ────────────────────────────────────────────────
+  app->secrets(['gitmsyncd-change-this-secret-' . ($ENV{GITMSYNCD_SECRET} || 'dev')]);
+
+  # ── Password hashing (SHA-256 with salt — bcrypt preferred but not available as OS package) ──
+  my $hash_password = sub {
+    my ($password) = @_;
+    my $salt = join('', map { ('a'..'z','A'..'Z','0'..'9')[int(rand(62))] } 1..16);
+    my $digest = sha256_hex($salt . $password);
+    return "sha256:$salt:$digest";
+  };
+
+  my $verify_password = sub {
+    my ($password, $stored_hash) = @_;
+    return 0 unless $stored_hash && $password;
+    if ($stored_hash =~ /^sha256:([^:]+):([0-9a-f]+)$/) {
+      my ($salt, $expected) = ($1, $2);
+      return sha256_hex($salt . $password) eq $expected;
+    }
+    return 0;
+  };
+
+  # ── Admin role check (reusable) ────────────────────────────────────
+  my $require_admin = sub ($c) {
+    my $user = $c->stash('current_user');
+    unless ($user && $user->{role} eq 'admin') {
+      if ($c->req->url->path =~ m{^/api/}) {
+        $c->render(json => { error => 'admin access required' }, status => 403);
+      } else {
+        $c->redirect_to('/');
+      }
+      return 0;
+    }
+    return 1;
+  };
+
+  # ── Public routes (no auth required) ───────────────────────────────
+
+  # Health endpoint — accessible without authentication (monitoring)
   get '/api/health' => sub ($c) {
     $c->render(json => { status => 'ok' });
   };
+
+  # Login page
+  get '/login' => sub ($c) {
+    # If already logged in, redirect to dashboard
+    if ($c->session('user_id')) {
+      return $c->redirect_to('/');
+    }
+    $c->render(template => 'login');
+  };
+
+  # Login POST
+  post '/login' => sub ($c) {
+    my $username = $c->param('username') // '';
+    my $password = $c->param('password') // '';
+
+    my $user = $c->dbh->selectrow_hashref(
+      q{SELECT * FROM users WHERE username = ? AND enabled = TRUE}, undef, $username
+    );
+
+    if ($user && $verify_password->($password, $user->{password_hash})) {
+      $c->session(user_id => $user->{id});
+      $c->dbh->do(q{UPDATE users SET last_login_at = NOW() WHERE id = ?}, undef, $user->{id});
+      $c->redirect_to('/');
+    } else {
+      $c->stash(error => 'Invalid username or password');
+      $c->render(template => 'login');
+    }
+  };
+
+  # Logout
+  get '/logout' => sub ($c) {
+    $c->session(expires => 1);
+    $c->redirect_to('/login');
+  };
+
+  # ── Auth middleware — all routes below require authentication ──────
+  under '/' => sub ($c) {
+    my $user_id = $c->session('user_id');
+    unless ($user_id) {
+      if ($c->req->url->path =~ m{^/api/}) {
+        $c->render(json => { error => 'authentication required' }, status => 401);
+      } else {
+        $c->redirect_to('/login');
+      }
+      return undef;
+    }
+
+    # Load user and stash for all authenticated routes
+    my $user = $c->dbh->selectrow_hashref(
+      q{SELECT id, username, role FROM users WHERE id = ? AND enabled = TRUE}, undef, $user_id
+    );
+    unless ($user) {
+      $c->session(expires => 1);
+      if ($c->req->url->path =~ m{^/api/}) {
+        $c->render(json => { error => 'authentication required' }, status => 401);
+      } else {
+        $c->redirect_to('/login');
+      }
+      return undef;
+    }
+
+    $c->stash(current_user => $user);
+    $c->stash(is_admin => ($user->{role} eq 'admin'));
+    return 1;
+  };
+
+  # ── Authenticated routes below ─────────────────────────────────────
 
   # ── Mappings CRUD ──────────────────────────────────────────────────
   get '/api/mappings' => sub ($c) {
@@ -40,6 +145,7 @@ sub start {
   };
 
   post '/api/mappings' => sub ($c) {
+    return unless $require_admin->($c);
     my $p = $c->req->json || {};
     $c->dbh->do(
       q{INSERT INTO repo_mappings (source_provider, source_full_path, target_provider, target_full_path, direction, enabled, profile_id)
@@ -53,6 +159,7 @@ sub start {
   };
 
   put '/api/mappings/:id' => sub ($c) {
+    return unless $require_admin->($c);
     my $id = $c->param('id');
     my $p  = $c->req->json || {};
     my @sets;
@@ -67,18 +174,36 @@ sub start {
   };
 
   del '/api/mappings/:id' => sub ($c) {
+    return unless $require_admin->($c);
     my $id = $c->param('id');
     $c->dbh->do(q{DELETE FROM repo_mappings WHERE id = ?}, undef, $id);
     $c->render(json => { ok => Mojo::JSON->true });
   };
 
   post '/api/sync/start/:profile_id' => sub ($c) {
+    return unless $require_admin->($c);
     my $id = $c->param('profile_id');
+
+    # Prevent duplicate queue entries — check for existing queued/running jobs
+    my $existing = $c->dbh->selectrow_hashref(
+      q{SELECT id FROM sync_jobs WHERE profile_id = ? AND status IN ('queued', 'running')}, undef, $id);
+    if ($existing) {
+      return $c->render(json => { error => 'A sync job is already queued or running for this profile.' }, status => 409);
+    }
+
+    # Check if the profile is currently locked by another sync
+    my $locked = $c->dbh->selectrow_hashref(
+      q{SELECT sync_locked, sync_locked_by FROM sync_profiles WHERE id = ? AND sync_locked = TRUE AND sync_locked_at >= NOW() - INTERVAL '30 minutes'}, undef, $id);
+    if ($locked) {
+      return $c->render(json => { error => 'This profile is currently being synced by ' . ($locked->{sync_locked_by} || 'another process') . '.' }, status => 409);
+    }
+
     $c->dbh->do(q{INSERT INTO sync_jobs (profile_id, status, started_at, message) VALUES (?, 'queued', NOW(), 'queued via API')}, undef, $id);
     $c->render(json => { ok => Mojo::JSON->true, profile_id => $id });
   };
 
   post '/api/sync/stop/:job_id' => sub ($c) {
+    return unless $require_admin->($c);
     my $id = $c->param('job_id');
     $c->dbh->do(q{UPDATE sync_jobs SET status='stopped', finished_at=NOW(), message='stopped via API' WHERE id=? AND status IN ('queued','running')}, undef, $id);
     $c->render(json => { ok => Mojo::JSON->true, job_id => $id });
@@ -96,6 +221,7 @@ sub start {
   };
 
   post '/api/providers' => sub ($c) {
+    return unless $require_admin->($c);
     my $p = $c->req->json || {};
     for my $f (qw(name provider_type api_token)) {
       return $c->render(json => { error => "missing required field: $f" }, status => 400) unless $p->{$f};
@@ -116,6 +242,7 @@ sub start {
   };
 
   put '/api/providers/:id' => sub ($c) {
+    return unless $require_admin->($c);
     my $id = $c->param('id');
     my $p  = $c->req->json || {};
     my $existing = $c->dbh->selectrow_hashref(q{SELECT id FROM providers WHERE id = ?}, undef, $id);
@@ -146,6 +273,7 @@ sub start {
   };
 
   del '/api/providers/:id' => sub ($c) {
+    return unless $require_admin->($c);
     my $id = $c->param('id');
     my $existing = $c->dbh->selectrow_hashref(q{SELECT id FROM providers WHERE id = ?}, undef, $id);
     return $c->render(json => { error => 'provider not found' }, status => 404) unless $existing;
@@ -156,6 +284,7 @@ sub start {
   # ── Provider connectivity test ─────────────────────────────────────
 
   post '/api/providers/:id/test' => sub ($c) {
+    return unless $require_admin->($c);
     my $id  = $c->param('id');
     my $row = $c->dbh->selectrow_hashref(
       q{SELECT id, provider_type, base_url, api_token FROM providers WHERE id = ?},
@@ -217,6 +346,7 @@ sub start {
                sp.source_provider_id, sp.target_provider_id,
                sp.conflict_policy, sp.enabled, sp.created_at,
                sp.sync_interval_minutes, sp.next_sync_at, sp.last_synced_at,
+               sp.sync_locked, sp.sync_locked_at, sp.sync_locked_by,
                src.name AS source_provider_name, src.provider_type AS source_provider_type,
                tgt.name AS target_provider_name, tgt.provider_type AS target_provider_type
         FROM sync_profiles sp
@@ -229,6 +359,7 @@ sub start {
   };
 
   post '/api/profiles' => sub ($c) {
+    return unless $require_admin->($c);
     my $p = $c->req->json || {};
     for my $f (qw(name direction source_owner target_owner)) {
       return $c->render(json => { error => "missing required field: $f" }, status => 400) unless $p->{$f};
@@ -264,6 +395,7 @@ sub start {
   };
 
   put '/api/profiles/:id' => sub ($c) {
+    return unless $require_admin->($c);
     my $id = $c->param('id');
     my $p  = $c->req->json || {};
     my $existing = $c->dbh->selectrow_hashref(q{SELECT id FROM sync_profiles WHERE id = ?}, undef, $id);
@@ -292,6 +424,7 @@ sub start {
   };
 
   del '/api/profiles/:id' => sub ($c) {
+    return unless $require_admin->($c);
     my $id = $c->param('id');
     my $existing = $c->dbh->selectrow_hashref(q{SELECT id FROM sync_profiles WHERE id = ?}, undef, $id);
     return $c->render(json => { error => 'profile not found' }, status => 404) unless $existing;
@@ -370,6 +503,7 @@ sub start {
   # ── Sync engine ────────────────────────────────────────────────────
 
   post '/api/sync/run/:profile_id' => sub ($c) {
+    return unless $require_admin->($c);
     my $profile_id = $c->param('profile_id');
 
     # Load profile with provider details
@@ -611,138 +745,243 @@ sub start {
       eval { $dbh->do(q{INSERT INTO sync_job_events (job_id, level, message) VALUES (?, ?, ?)}, undef, $job_id, $level, $msg); };
     };
 
-    # Load profile with providers (including SSH settings)
-    my $profile = $dbh->selectrow_hashref(
-      q{SELECT sp.*,
-               src.provider_type AS src_type, src.base_url AS src_base_url, src.api_token AS src_token,
-               src.clone_protocol AS src_clone_proto, src.ssh_key_path AS src_ssh_key,
-               tgt.provider_type AS tgt_type, tgt.base_url AS tgt_base_url, tgt.api_token AS tgt_token,
-               tgt.push_protocol AS tgt_push_proto, tgt.ssh_key_path AS tgt_ssh_key
-        FROM sync_profiles sp
-        JOIN providers src ON sp.source_provider_id = src.id
-        JOIN providers tgt ON sp.target_provider_id = tgt.id
-        WHERE sp.id = ?}, undef, $profile_id
+    # Acquire lock — atomic UPDATE with stale lock breaker (30 min timeout)
+    my $lock_acquired = $dbh->selectrow_hashref(
+      q{UPDATE sync_profiles SET sync_locked = TRUE, sync_locked_at = NOW(), sync_locked_by = 'worker-' || pg_backend_pid()
+        WHERE id = ? AND (sync_locked = FALSE OR sync_locked_at < NOW() - INTERVAL '30 minutes')
+        RETURNING id}, undef, $profile_id
     );
-
-    unless ($profile) {
-      $log_event->('error', 'profile not found or providers missing');
-      $dbh->do(q{UPDATE sync_jobs SET status='failed', finished_at=NOW(), message='profile not found' WHERE id=?}, undef, $job_id);
+    unless ($lock_acquired) {
+      $log_event->('warn', "profile $profile_id is locked by another sync — skipping");
+      $dbh->do(q{UPDATE sync_jobs SET status='stopped', finished_at=NOW(), message='skipped: profile locked by another sync' WHERE id=?}, undef, $job_id);
       return;
     }
 
-    my @mappings = @{ $dbh->selectall_arrayref(
-      q{SELECT * FROM repo_mappings WHERE profile_id = ? AND enabled = TRUE}, { Slice => {} }, $profile_id
-    ) || [] };
-
-    unless (@mappings) {
-      $log_event->('warn', 'no active repo mappings found for this profile');
-      $dbh->do(q{UPDATE sync_jobs SET status='success', finished_at=NOW(), message='no mappings to sync' WHERE id=?}, undef, $job_id);
-      return;
-    }
-
-    $log_event->('info', "found " . scalar(@mappings) . " repo mapping(s) to sync");
-
-    # Build clone/push URL — supports both HTTPS (token) and SSH (key)
-    my $build_url = sub {
-      my ($type, $base_url, $token, $full_path, $protocol) = @_;
-      $protocol ||= 'https';
-
-      if ($protocol eq 'ssh') {
-        # SSH URLs
-        if ($type eq 'github') {
-          return "git\@github.com:$full_path.git";
-        } elsif ($type eq 'gitlab') {
-          my $base = $base_url || 'https://gitlab.com';
-          my ($host) = $base =~ m{https?://([^/:]+)};
-          $host ||= 'gitlab.com';
-          return "git\@$host:$full_path.git";
-        } elsif ($type eq 'gitea') {
-          my $base = $base_url || 'https://gitea.com';
-          my ($host) = $base =~ m{https?://([^/:]+)};
-          my ($port) = $base =~ m{:(\d+)};
-          $host ||= 'gitea.com';
-          if ($port && $port ne '22') {
-            return "ssh://git\@$host:$port/$full_path.git";
-          }
-          return "git\@$host:$full_path.git";
-        }
-      }
-
-      # HTTPS URLs
-      if ($type eq 'github') {
-        return "https://$token\@github.com/$full_path.git";
-      } elsif ($type eq 'gitlab') {
-        my $base = $base_url || 'https://gitlab.com';
-        $base =~ s{/+$}{};
-        if ($base =~ m{^(https?)://(.+)}) { return "$1://oauth2:$token\@$2/$full_path.git"; }
-        return "https://oauth2:$token\@$base/$full_path.git";
-      } elsif ($type eq 'gitea') {
-        my $base = $base_url || 'https://gitea.com';
-        $base =~ s{/+$}{};
-        if ($base =~ m{^(https?)://(.+)}) { return "$1://$token\@$2/$full_path.git"; }
-        return "https://$token\@$base/$full_path.git";
-      }
-      return undef;
+    # Release lock helper — runs even on error
+    my $release_lock = sub {
+      eval { $dbh->do(q{UPDATE sync_profiles SET sync_locked = FALSE, sync_locked_at = NULL, sync_locked_by = NULL WHERE id = ?}, undef, $profile_id); };
     };
 
-    my $workdir = '/tmp/gitmsyncd-workdir';
-    make_path($workdir) unless -d $workdir;
-    my ($synced, $failed) = (0, 0);
+    # Wrap entire sync in eval so lock is always released
+    eval {
+      # Load profile with providers (including SSH settings)
+      my $profile = $dbh->selectrow_hashref(
+        q{SELECT sp.*,
+                 src.provider_type AS src_type, src.base_url AS src_base_url, src.api_token AS src_token,
+                 src.clone_protocol AS src_clone_proto, src.ssh_key_path AS src_ssh_key,
+                 tgt.provider_type AS tgt_type, tgt.base_url AS tgt_base_url, tgt.api_token AS tgt_token,
+                 tgt.push_protocol AS tgt_push_proto, tgt.ssh_key_path AS tgt_ssh_key
+          FROM sync_profiles sp
+          JOIN providers src ON sp.source_provider_id = src.id
+          JOIN providers tgt ON sp.target_provider_id = tgt.id
+          WHERE sp.id = ?}, undef, $profile_id
+      );
 
-    # Set up SSH command if source uses SSH
-    my $src_proto = $profile->{src_clone_proto} || 'https';
-    my $tgt_proto = $profile->{tgt_push_proto} || 'https';
-    my $src_ssh_cmd = '';
-    my $tgt_ssh_cmd = '';
-
-    if ($src_proto eq 'ssh' && $profile->{src_ssh_key}) {
-      $src_ssh_cmd = "GIT_SSH_COMMAND='ssh -i $profile->{src_ssh_key} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no'";
-    }
-    if ($tgt_proto eq 'ssh' && $profile->{tgt_ssh_key}) {
-      $tgt_ssh_cmd = "GIT_SSH_COMMAND='ssh -i $profile->{tgt_ssh_key} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no'";
-    }
-
-    for my $m (@mappings) {
-      my $src_url = $build_url->($profile->{src_type}, $profile->{src_base_url}, $profile->{src_token}, $m->{source_full_path}, $src_proto);
-      my $tgt_url = $build_url->($profile->{tgt_type}, $profile->{tgt_base_url}, $profile->{tgt_token}, $m->{target_full_path}, $tgt_proto);
-
-      unless ($src_url && $tgt_url) {
-        $log_event->('error', "cannot build URLs for $m->{source_full_path}");
-        $failed++; next;
+      unless ($profile) {
+        $log_event->('error', 'profile not found or providers missing');
+        $dbh->do(q{UPDATE sync_jobs SET status='failed', finished_at=NOW(), message='profile not found' WHERE id=?}, undef, $job_id);
+        return;
       }
 
-      (my $dir_name = $m->{source_full_path}) =~ s{/}{--}g;
-      my $repo_dir = File::Spec->catdir($workdir, "$dir_name.git");
+      my @mappings = @{ $dbh->selectall_arrayref(
+        q{SELECT * FROM repo_mappings WHERE profile_id = ? AND enabled = TRUE}, { Slice => {} }, $profile_id
+      ) || [] };
 
-      $log_event->('info', "syncing $m->{source_full_path} -> $m->{target_full_path} [$src_proto/$tgt_proto]");
-
-      rmtree($repo_dir) if -d $repo_dir;
-      my $clone_cmd = $src_ssh_cmd ? "$src_ssh_cmd git clone --mirror '$src_url' '$repo_dir' 2>&1" : "git clone --mirror '$src_url' '$repo_dir' 2>&1";
-      my $clone_out = `$clone_cmd`;
-      if ($? != 0) {
-        $log_event->('error', "clone failed for $m->{source_full_path}: $clone_out");
-        $failed++; next;
+      unless (@mappings) {
+        $log_event->('warn', 'no active repo mappings found for this profile');
+        $dbh->do(q{UPDATE sync_jobs SET status='success', finished_at=NOW(), message='no mappings to sync' WHERE id=?}, undef, $job_id);
+        return;
       }
 
-      my $push_cmd = $tgt_ssh_cmd ? "cd '$repo_dir' && $tgt_ssh_cmd git push --mirror '$tgt_url' 2>&1" : "cd '$repo_dir' && git push --mirror '$tgt_url' 2>&1";
-      my $push_out = `$push_cmd`;
-      if ($? != 0) {
-        $log_event->('error', "push failed for $m->{target_full_path}: $push_out");
-        $failed++;
-      } else {
-        $log_event->('info', "synced $m->{source_full_path} -> $m->{target_full_path} successfully");
-        $synced++;
+      $log_event->('info', "found " . scalar(@mappings) . " repo mapping(s) to sync");
+
+      # Build clone/push URL — supports both HTTPS (token) and SSH (key)
+      my $build_url = sub {
+        my ($type, $base_url, $token, $full_path, $protocol) = @_;
+        $protocol ||= 'https';
+
+        if ($protocol eq 'ssh') {
+          # SSH URLs
+          if ($type eq 'github') {
+            return "git\@github.com:$full_path.git";
+          } elsif ($type eq 'gitlab') {
+            my $base = $base_url || 'https://gitlab.com';
+            my ($host) = $base =~ m{https?://([^/:]+)};
+            $host ||= 'gitlab.com';
+            return "git\@$host:$full_path.git";
+          } elsif ($type eq 'gitea') {
+            my $base = $base_url || 'https://gitea.com';
+            my ($host) = $base =~ m{https?://([^/:]+)};
+            my ($port) = $base =~ m{:(\d+)};
+            $host ||= 'gitea.com';
+            if ($port && $port ne '22') {
+              return "ssh://git\@$host:$port/$full_path.git";
+            }
+            return "git\@$host:$full_path.git";
+          }
+        }
+
+        # HTTPS URLs
+        if ($type eq 'github') {
+          return "https://$token\@github.com/$full_path.git";
+        } elsif ($type eq 'gitlab') {
+          my $base = $base_url || 'https://gitlab.com';
+          $base =~ s{/+$}{};
+          if ($base =~ m{^(https?)://(.+)}) { return "$1://oauth2:$token\@$2/$full_path.git"; }
+          return "https://oauth2:$token\@$base/$full_path.git";
+        } elsif ($type eq 'gitea') {
+          my $base = $base_url || 'https://gitea.com';
+          $base =~ s{/+$}{};
+          if ($base =~ m{^(https?)://(.+)}) { return "$1://$token\@$2/$full_path.git"; }
+          return "https://$token\@$base/$full_path.git";
+        }
+        return undef;
+      };
+
+      my $workdir = '/tmp/gitmsyncd-workdir';
+      make_path($workdir) unless -d $workdir;
+      my ($synced, $failed) = (0, 0);
+
+      # Set up SSH command if source uses SSH
+      my $src_proto = $profile->{src_clone_proto} || 'https';
+      my $tgt_proto = $profile->{tgt_push_proto} || 'https';
+      my $src_ssh_cmd = '';
+      my $tgt_ssh_cmd = '';
+
+      if ($src_proto eq 'ssh' && $profile->{src_ssh_key}) {
+        $src_ssh_cmd = "GIT_SSH_COMMAND='ssh -i $profile->{src_ssh_key} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no'";
       }
-      rmtree($repo_dir) if -d $repo_dir;
+      if ($tgt_proto eq 'ssh' && $profile->{tgt_ssh_key}) {
+        $tgt_ssh_cmd = "GIT_SSH_COMMAND='ssh -i $profile->{tgt_ssh_key} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no'";
+      }
+
+      # Retry helper (exponential backoff)
+      my $retry = sub {
+        my ($attempts, $cmd) = @_;
+        for my $n (1..$attempts) {
+          my $out = `$cmd`;
+          return (0, $out) if $? == 0;
+          if ($n < $attempts) {
+            my $delay = 2 * $n;
+            $log_event->('warn', "attempt $n failed, retrying in ${delay}s...");
+            sleep $delay;
+          } else {
+            return ($?, $out);
+          }
+        }
+      };
+
+      # Protected branches + conflict policy
+      my @protected = split(/\s+/, $profile->{protected_branches} || 'main master develop');
+      my %is_protected = map { $_ => 1 } @protected;
+      my $conflict_policy = $profile->{conflict_policy} || 'ff-only';
+
+      for my $m (@mappings) {
+        my $src_url = $build_url->($profile->{src_type}, $profile->{src_base_url}, $profile->{src_token}, $m->{source_full_path}, $src_proto);
+        my $tgt_url = $build_url->($profile->{tgt_type}, $profile->{tgt_base_url}, $profile->{tgt_token}, $m->{target_full_path}, $tgt_proto);
+
+        unless ($src_url && $tgt_url) {
+          $log_event->('error', "cannot build URLs for $m->{source_full_path}");
+          $failed++; next;
+        }
+
+        (my $dir_name = $m->{source_full_path}) =~ s{/}{--}g;
+        my $repo_dir = File::Spec->catdir($workdir, "$dir_name.git");
+
+        $log_event->('info', "syncing $m->{source_full_path} -> $m->{target_full_path} [$src_proto/$tgt_proto] policy=$conflict_policy");
+
+        # Clone with retry
+        rmtree($repo_dir) if -d $repo_dir;
+        my $clone_cmd = $src_ssh_cmd ? "$src_ssh_cmd git clone --mirror '$src_url' '$repo_dir' 2>&1" : "git clone --mirror '$src_url' '$repo_dir' 2>&1";
+        my ($clone_rc, $clone_out) = $retry->(3, $clone_cmd);
+        if ($clone_rc != 0) {
+          $log_event->('error', "clone failed after 3 attempts for $m->{source_full_path}: $clone_out");
+          $failed++; next;
+        }
+
+        if ($conflict_policy eq 'reject') {
+          # Fetch target, check for divergence, skip entirely if any branch diverged
+          my $fetch_tgt = $tgt_ssh_cmd
+            ? "cd '$repo_dir' && $tgt_ssh_cmd git fetch '$tgt_url' '+refs/heads/*:refs/remotes/destination/*' 2>&1"
+            : "cd '$repo_dir' && git fetch '$tgt_url' '+refs/heads/*:refs/remotes/destination/*' 2>&1";
+          `$fetch_tgt`;
+          my $has_conflict = 0;
+          for my $branch (split(/\n/, `git -C '$repo_dir' for-each-ref --format='%(refname:strip=2)' refs/heads`)) {
+            chomp $branch; next unless $branch;
+            my $dst = `git -C '$repo_dir' rev-parse -q --verify 'refs/remotes/destination/$branch' 2>/dev/null`;
+            chomp $dst; next unless $dst;
+            if (system("git -C '$repo_dir' merge-base --is-ancestor 'refs/remotes/destination/$branch' 'refs/heads/$branch' 2>/dev/null") != 0) {
+              $log_event->('warn', "branch '$branch' diverged — conflict (reject policy)");
+              $has_conflict = 1;
+            }
+          }
+          if ($has_conflict) {
+            $log_event->('warn', "skipping $m->{source_full_path} — divergence detected (reject)");
+            $failed++; rmtree($repo_dir) if -d $repo_dir; next;
+          }
+          # No conflicts — safe mirror push
+          my $push_cmd = $tgt_ssh_cmd ? "cd '$repo_dir' && $tgt_ssh_cmd git push --mirror '$tgt_url' 2>&1" : "cd '$repo_dir' && git push --mirror '$tgt_url' 2>&1";
+          my ($push_rc, $push_out) = $retry->(3, $push_cmd);
+          if ($push_rc != 0) { $log_event->('error', "push failed: $push_out"); $failed++; }
+          else { $log_event->('info', "synced $m->{source_full_path} -> $m->{target_full_path} (reject policy, clean)"); $synced++; }
+
+        } elsif ($conflict_policy eq 'force-push') {
+          # Force mirror — source is authoritative
+          my $push_cmd = $tgt_ssh_cmd ? "cd '$repo_dir' && $tgt_ssh_cmd git push --mirror --force '$tgt_url' 2>&1" : "cd '$repo_dir' && git push --mirror --force '$tgt_url' 2>&1";
+          my ($push_rc, $push_out) = $retry->(3, $push_cmd);
+          if ($push_rc != 0) { $log_event->('error', "push failed: $push_out"); $failed++; }
+          else { $log_event->('info', "synced $m->{source_full_path} -> $m->{target_full_path} (force-push)"); $synced++; }
+
+        } else {
+          # ff-only (default): per-branch conflict check on protected branches
+          my $fetch_tgt = $tgt_ssh_cmd
+            ? "cd '$repo_dir' && $tgt_ssh_cmd git fetch '$tgt_url' '+refs/heads/*:refs/remotes/destination/*' 2>&1"
+            : "cd '$repo_dir' && git fetch '$tgt_url' '+refs/heads/*:refs/remotes/destination/*' 2>&1";
+          `$fetch_tgt`;
+          my @refspecs = ('refs/tags/*:refs/tags/*');
+          my $skipped = 0;
+          for my $branch (split(/\n/, `git -C '$repo_dir' for-each-ref --format='%(refname:strip=2)' refs/heads`)) {
+            chomp $branch; next unless $branch;
+            if ($is_protected{$branch}) {
+              my $dst = `git -C '$repo_dir' rev-parse -q --verify 'refs/remotes/destination/$branch' 2>/dev/null`;
+              chomp $dst;
+              if ($dst && system("git -C '$repo_dir' merge-base --is-ancestor 'refs/remotes/destination/$branch' 'refs/heads/$branch' 2>/dev/null") != 0) {
+                $log_event->('warn', "protected branch '$branch' diverged — skipping (ff-only)");
+                $skipped++; next;
+              }
+            }
+            push @refspecs, "refs/heads/$branch:refs/heads/$branch";
+          }
+          $log_event->('warn', "$skipped protected branch(es) skipped (non-fast-forward)") if $skipped;
+          my $refspec_str = join(' ', map { "'$_'" } @refspecs);
+          my $push_cmd = $tgt_ssh_cmd
+            ? "cd '$repo_dir' && $tgt_ssh_cmd git push --prune '$tgt_url' $refspec_str 2>&1"
+            : "cd '$repo_dir' && git push --prune '$tgt_url' $refspec_str 2>&1";
+          my ($push_rc, $push_out) = $retry->(3, $push_cmd);
+          if ($push_rc != 0) { $log_event->('error', "push failed: $push_out"); $failed++; }
+          else { $log_event->('info', "synced $m->{source_full_path} -> $m->{target_full_path} (ff-only, $skipped skipped)"); $synced++; }
+        }
+
+        rmtree($repo_dir) if -d $repo_dir;
+      }
+
+      my $status = $failed > 0 ? 'failed' : 'success';
+      my $msg = "synced=$synced failed=$failed total=" . scalar(@mappings);
+      $log_event->('info', "job finished: $msg");
+      $dbh->do(q{UPDATE sync_jobs SET status=?, finished_at=NOW(), message=? WHERE id=?}, undef, $status, $msg, $job_id);
+
+      # Update last_synced_at on the profile
+      $dbh->do(q{UPDATE sync_profiles SET last_synced_at = NOW() WHERE id = ?}, undef, $profile_id);
+    };
+    # Capture any error from the eval block
+    my $sync_err = $@;
+    if ($sync_err) {
+      $log_event->('error', "sync crashed: $sync_err");
+      eval { $dbh->do(q{UPDATE sync_jobs SET status='failed', finished_at=NOW(), message=? WHERE id=?}, undef, "internal error: $sync_err", $job_id); };
     }
 
-    my $status = $failed > 0 ? 'failed' : 'success';
-    my $msg = "synced=$synced failed=$failed total=" . scalar(@mappings);
-    $log_event->('info', "job finished: $msg");
-    $dbh->do(q{UPDATE sync_jobs SET status=?, finished_at=NOW(), message=? WHERE id=?}, undef, $status, $msg, $job_id);
-
-    # Update last_synced_at on the profile
-    $dbh->do(q{UPDATE sync_profiles SET last_synced_at = NOW() WHERE id = ?}, undef, $profile_id);
+    # ALWAYS release the lock, even if sync threw an error
+    $release_lock->();
   };
 
   # ── Queue Worker + Scheduler — runs every 5 seconds ───────────
@@ -759,7 +998,7 @@ sub start {
       return;  # one job per tick, don't stack
     }
 
-    # 2. Check for scheduled profiles that are due
+    # 2. Check for scheduled profiles that are due (skip locked profiles)
     my $due_profile = $dbh->selectrow_hashref(
       q{SELECT id FROM sync_profiles
         WHERE enabled = TRUE
@@ -767,6 +1006,7 @@ sub start {
           AND sync_interval_minutes > 0
           AND next_sync_at IS NOT NULL
           AND next_sync_at <= NOW()
+          AND (sync_locked = FALSE OR sync_locked_at < NOW() - INTERVAL '30 minutes')
         ORDER BY next_sync_at ASC
         LIMIT 1}
     );

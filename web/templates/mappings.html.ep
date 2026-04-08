@@ -88,7 +88,11 @@
             </a>
           </li>
         </ul>
-        <span class="navbar-text text-light opacity-75">DEC-LLC</span>
+        <span class="navbar-text text-light me-3">
+          <i class="bi bi-person"></i> <%= $current_user->{username} %>
+          (<%= $current_user->{role} %>)
+        </span>
+        <a class="nav-link text-light" href="/logout"><i class="bi bi-box-arrow-right"></i> Logout</a>
       </div>
     </div>
   </nav>
@@ -163,20 +167,30 @@
                 </td>
                 <td><small><%= $dir %></small></td>
                 <td>
-                  % if ($m->{enabled}) {
-                    <button class="btn btn-sm btn-success" onclick="toggleMapping(<%= $m->{id} %>, false)" title="Click to disable">
-                      <i class="bi bi-toggle-on"></i>
-                    </button>
+                  % if ($is_admin) {
+                    % if ($m->{enabled}) {
+                      <button class="btn btn-sm btn-success" onclick="toggleMapping(<%= $m->{id} %>, false)" title="Click to disable">
+                        <i class="bi bi-toggle-on"></i>
+                      </button>
+                    % } else {
+                      <button class="btn btn-sm btn-secondary" onclick="toggleMapping(<%= $m->{id} %>, true)" title="Click to enable">
+                        <i class="bi bi-toggle-off"></i>
+                      </button>
+                    % }
                   % } else {
-                    <button class="btn btn-sm btn-secondary" onclick="toggleMapping(<%= $m->{id} %>, true)" title="Click to enable">
-                      <i class="bi bi-toggle-off"></i>
-                    </button>
+                    % if ($m->{enabled}) {
+                      <span class="badge bg-success">Yes</span>
+                    % } else {
+                      <span class="badge bg-secondary">No</span>
+                    % }
                   % }
                 </td>
                 <td class="text-end">
+                  % if ($is_admin) {
                   <button class="btn btn-sm btn-outline-danger" onclick="deleteMapping(<%= $m->{id} %>)" title="Delete">
                     <i class="bi bi-trash"></i>
                   </button>
+                  % }
                 </td>
               </tr>
               % }

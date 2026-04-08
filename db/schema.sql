@@ -51,7 +51,10 @@ CREATE TABLE IF NOT EXISTS sync_profiles (
   protected_branches TEXT NOT NULL DEFAULT 'main master develop',
   conflict_policy VARCHAR(32) NOT NULL DEFAULT 'ff-only',
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  sync_locked BOOLEAN DEFAULT FALSE,
+  sync_locked_at TIMESTAMPTZ DEFAULT NULL,
+  sync_locked_by VARCHAR(64) DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS sync_jobs (
@@ -70,3 +73,19 @@ CREATE TABLE IF NOT EXISTS sync_job_events (
   event_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   message TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS users (
+  id BIGSERIAL PRIMARY KEY,
+  username VARCHAR(64) NOT NULL UNIQUE,
+  password_hash VARCHAR(255) NOT NULL,
+  role VARCHAR(16) NOT NULL DEFAULT 'readonly' CHECK (role IN ('admin', 'readonly')),
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_login_at TIMESTAMPTZ
+);
+
+-- Default admin user (password: admin — user MUST change on first login)
+-- Hash format: sha256:<salt>:<hex_digest> using Digest::SHA
+INSERT INTO users (username, password_hash, role)
+VALUES ('admin', 'sha256:gitmsyncd-default-salt:6691ec27bd95337f5b7321240a619035be1f2378d97a32fedd012f4479ef82b8', 'admin')
+ON CONFLICT (username) DO NOTHING;
