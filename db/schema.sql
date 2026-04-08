@@ -28,12 +28,26 @@ CREATE TABLE IF NOT EXISTS repo_mappings (
   UNIQUE(source_provider, source_full_path, target_provider, target_full_path, direction)
 );
 
+CREATE TABLE IF NOT EXISTS providers (
+  id BIGSERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  provider_type VARCHAR(32) NOT NULL CHECK (provider_type IN ('github','gitlab','gitea')),
+  base_url TEXT,  -- NULL for github.com (uses api.github.com)
+  api_token TEXT NOT NULL,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_tested_at TIMESTAMPTZ,
+  test_status VARCHAR(32) DEFAULT 'untested'
+);
+
 CREATE TABLE IF NOT EXISTS sync_profiles (
   id BIGSERIAL PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
   direction VARCHAR(32) NOT NULL CHECK (direction IN ('github_to_gitlab','gitlab_to_github')),
   source_owner TEXT NOT NULL,
   target_owner TEXT NOT NULL,
+  source_provider_id BIGINT REFERENCES providers(id),
+  target_provider_id BIGINT REFERENCES providers(id),
   protected_branches TEXT NOT NULL DEFAULT 'main master develop',
   conflict_policy VARCHAR(32) NOT NULL DEFAULT 'ff-only',
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
