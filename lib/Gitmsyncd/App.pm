@@ -771,6 +771,32 @@ sub start {
     $c->render(template => 'jobs');
   };
 
+  get '/status' => sub ($c) {
+    # System stats
+    my $providers = $c->dbh->selectrow_hashref(q{SELECT count(*) as total, count(*) FILTER (WHERE test_status = 'ok') as ok FROM providers WHERE enabled});
+    my $profiles = $c->dbh->selectrow_hashref(q{SELECT count(*) as total, count(*) FILTER (WHERE enabled) as enabled, count(*) FILTER (WHERE sync_interval_minutes > 0) as scheduled FROM sync_profiles});
+    my $jobs = $c->dbh->selectrow_hashref(q{SELECT count(*) as total, count(*) FILTER (WHERE status = 'success') as success, count(*) FILTER (WHERE status = 'failed') as failed, count(*) FILTER (WHERE status = 'queued') as queued, count(*) FILTER (WHERE status = 'running') as running FROM sync_jobs});
+    my $mappings = $c->dbh->selectrow_hashref(q{SELECT count(*) as total, count(*) FILTER (WHERE enabled) as enabled FROM repo_mappings});
+    my $users = $c->dbh->selectall_arrayref(q{SELECT id, username, role, enabled, last_login_at FROM users ORDER BY id}, { Slice => {} });
+    my $next_syncs = $c->dbh->selectall_arrayref(q{SELECT sp.name, sp.sync_interval_minutes, sp.next_sync_at, sp.last_synced_at, sp.sync_locked, sp.sync_locked_by FROM sync_profiles sp WHERE sp.enabled AND sp.sync_interval_minutes > 0 ORDER BY sp.next_sync_at ASC NULLS LAST LIMIT 10}, { Slice => {} });
+    my $recent_jobs = $c->dbh->selectall_arrayref(q{SELECT sj.id, sj.status, sj.started_at, sj.finished_at, sj.message, sp.name as profile_name FROM sync_jobs sj LEFT JOIN sync_profiles sp ON sj.profile_id = sp.id ORDER BY sj.id DESC LIMIT 5}, { Slice => {} });
+
+    # Workdir size
+    my $workdir_size = `du -sh /tmp/gitmsyncd-workdir 2>/dev/null | cut -f1` || '0';
+    chomp $workdir_size;
+
+    # DB size
+    my $db_size = $c->dbh->selectrow_hashref(q{SELECT pg_size_pretty(pg_database_size('gitmsyncd')) as size});
+
+    $c->stash(
+      providers => $providers, profiles => $profiles, jobs_stats => $jobs,
+      mappings => $mappings, users => $users, next_syncs => $next_syncs,
+      recent_jobs => $recent_jobs, workdir_size => $workdir_size,
+      db_size => $db_size->{size}, start_time => $^T,
+    );
+    $c->render(template => 'status');
+  };
+
   # ── Sync Engine (shared by queue worker and direct run) ─────────
 
   my $run_sync_job = sub {

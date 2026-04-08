@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>System Status - git-advanced-multisync</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
+  <style>
+    :root { --brand-dark: #0f2b46; }
+    .navbar { background-color: var(--brand-dark) !important; }
+    .navbar-brand { font-weight: 700; }
+    .stat-card { border-left: 4px solid #0d6efd; }
+    .stat-card.green { border-left-color: #198754; }
+    .stat-card.yellow { border-left-color: #ffc107; }
+    .stat-card.red { border-left-color: #dc3545; }
+    .stat-number { font-size: 1.8rem; font-weight: 700; color: var(--brand-dark); }
+    footer { color: #6c757d; font-size: 0.85rem; }
+  </style>
+</head>
+<body class="bg-light">
+  <nav class="navbar navbar-expand-lg navbar-dark">
+    <div class="container-fluid">
+      <a class="navbar-brand" href="/"><i class="bi bi-arrow-repeat"></i> git-advanced-multisync</a>
+      <div class="collapse navbar-collapse">
+        <ul class="navbar-nav me-auto">
+          <li class="nav-item"><a class="nav-link" href="/">Dashboard</a></li>
+          <li class="nav-item"><a class="nav-link" href="/providers">Providers</a></li>
+          <li class="nav-item"><a class="nav-link" href="/profiles">Profiles</a></li>
+          <li class="nav-item"><a class="nav-link" href="/mappings">Mappings</a></li>
+          <li class="nav-item"><a class="nav-link" href="/jobs">Jobs</a></li>
+          <li class="nav-item"><a class="nav-link active" href="/status">Status</a></li>
+        </ul>
+        <span class="navbar-text text-light me-3">
+          <i class="bi bi-person"></i> <%= $current_user->{username} %>
+          (<%= $current_user->{role} %>)
+        </span>
+        <a class="nav-link text-light" href="/logout"><i class="bi bi-box-arrow-right"></i> Logout</a>
+      </div>
+    </div>
+  </nav>
+
+  <div class="container-fluid py-4">
+    <h2 class="mb-4"><i class="bi bi-activity"></i> System Status</h2>
+
+    <!-- Daemon Info -->
+    <div class="row g-3 mb-4">
+      <div class="col-md-3">
+        <div class="card stat-card green h-100">
+          <div class="card-body">
+            <div class="text-muted small text-uppercase">Daemon</div>
+            <div class="stat-number text-success"><i class="bi bi-check-circle"></i></div>
+            <div>Running</div>
+            <small class="text-muted">PID: <%= $$ %></small>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="card stat-card h-100">
+          <div class="card-body">
+            <div class="text-muted small text-uppercase">Uptime</div>
+            % my $uptime_secs = time() - $start_time;
+            % my $days = int($uptime_secs / 86400);
+            % my $hours = int(($uptime_secs % 86400) / 3600);
+            % my $mins = int(($uptime_secs % 3600) / 60);
+            <div class="stat-number"><%= $days ? "${days}d " : "" %><%= "${hours}h ${mins}m" %></div>
+            <small class="text-muted">Started: <%= scalar localtime($start_time) %></small>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="card stat-card h-100">
+          <div class="card-body">
+            <div class="text-muted small text-uppercase">Database</div>
+            <div class="stat-number text-success"><i class="bi bi-database-check"></i></div>
+            <div>Connected</div>
+            <small class="text-muted">Size: <%= $db_size %></small>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="card stat-card h-100">
+          <div class="card-body">
+            <div class="text-muted small text-uppercase">Work Directory</div>
+            <div class="stat-number"><%= $workdir_size %></div>
+            <small class="text-muted">/tmp/gitmsyncd-workdir</small>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Counts -->
+    <div class="row g-3 mb-4">
+      <div class="col-md-2">
+        <div class="card stat-card green h-100">
+          <div class="card-body text-center">
+            <div class="text-muted small">Providers</div>
+            <div class="stat-number"><%= $providers->{total} %></div>
+            <small class="text-success"><%= $providers->{ok} %> connected</small>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-2">
+        <div class="card stat-card h-100">
+          <div class="card-body text-center">
+            <div class="text-muted small">Profiles</div>
+            <div class="stat-number"><%= $profiles->{total} %></div>
+            <small><%= $profiles->{enabled} %> enabled, <%= $profiles->{scheduled} %> scheduled</small>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-2">
+        <div class="card stat-card h-100">
+          <div class="card-body text-center">
+            <div class="text-muted small">Repo Mappings</div>
+            <div class="stat-number"><%= $mappings->{total} %></div>
+            <small><%= $mappings->{enabled} %> enabled</small>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-2">
+        <div class="card stat-card green h-100">
+          <div class="card-body text-center">
+            <div class="text-muted small">Jobs (success)</div>
+            <div class="stat-number text-success"><%= $jobs_stats->{success} %></div>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-2">
+        <div class="card stat-card red h-100">
+          <div class="card-body text-center">
+            <div class="text-muted small">Jobs (failed)</div>
+            <div class="stat-number text-danger"><%= $jobs_stats->{failed} %></div>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-2">
+        <div class="card stat-card yellow h-100">
+          <div class="card-body text-center">
+            <div class="text-muted small">Queued / Running</div>
+            <div class="stat-number"><%= $jobs_stats->{queued} + $jobs_stats->{running} %></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row g-3">
+      <!-- Scheduled Syncs -->
+      <div class="col-md-6">
+        <div class="card">
+          <div class="card-header bg-white"><h6 class="mb-0"><i class="bi bi-clock-history"></i> Scheduled Syncs</h6></div>
+          <div class="card-body p-0">
+            <table class="table table-sm table-striped mb-0">
+              <thead class="table-light"><tr><th>Profile</th><th>Interval</th><th>Next Sync</th><th>Last Synced</th><th>Lock</th></tr></thead>
+              <tbody>
+                % if (@{$next_syncs}) {
+                  % for my $s (@{$next_syncs}) {
+                  <tr>
+                    <td><strong><%= $s->{name} %></strong></td>
+                    <td><%= $s->{sync_interval_minutes} %>min</td>
+                    <td><small><%= $s->{next_sync_at} // 'not set' %></small></td>
+                    <td><small><%= $s->{last_synced_at} // 'never' %></small></td>
+                    <td>
+                      % if ($s->{sync_locked}) {
+                        <span class="badge bg-warning text-dark"><i class="bi bi-lock"></i> <%= $s->{sync_locked_by} // 'locked' %></span>
+                      % } else {
+                        <span class="text-success"><i class="bi bi-unlock"></i></span>
+                      % }
+                    </td>
+                  </tr>
+                  % }
+                % } else {
+                  <tr><td colspan="5" class="text-muted text-center py-3">No scheduled profiles. Set an interval on a profile to enable.</td></tr>
+                % }
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Users -->
+      <div class="col-md-6">
+        <div class="card">
+          <div class="card-header bg-white"><h6 class="mb-0"><i class="bi bi-people"></i> Users</h6></div>
+          <div class="card-body p-0">
+            <table class="table table-sm table-striped mb-0">
+              <thead class="table-light"><tr><th>Username</th><th>Role</th><th>Enabled</th><th>Last Login</th></tr></thead>
+              <tbody>
+                % for my $u (@{$users}) {
+                <tr>
+                  <td><strong><%= $u->{username} %></strong></td>
+                  <td><span class="badge <%= $u->{role} eq 'admin' ? 'bg-primary' : 'bg-secondary' %>"><%= $u->{role} %></span></td>
+                  <td><%= $u->{enabled} ? 'Yes' : 'No' %></td>
+                  <td><small><%= $u->{last_login_at} // 'never' %></small></td>
+                </tr>
+                % }
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Recent Jobs -->
+    <div class="card mt-3">
+      <div class="card-header bg-white"><h6 class="mb-0"><i class="bi bi-journal-text"></i> Recent Jobs</h6></div>
+      <div class="card-body p-0">
+        <table class="table table-sm table-striped mb-0">
+          <thead class="table-light"><tr><th>ID</th><th>Profile</th><th>Status</th><th>Started</th><th>Finished</th><th>Message</th></tr></thead>
+          <tbody>
+            % for my $j (@{$recent_jobs}) {
+            <tr>
+              <td><%= $j->{id} %></td>
+              <td><%= $j->{profile_name} // '?' %></td>
+              <td>
+                % my $s = $j->{status};
+                <span class="badge bg-<%= $s eq 'success' ? 'success' : $s eq 'failed' ? 'danger' : $s eq 'running' ? 'primary' : 'secondary' %>"><%= $s %></span>
+              </td>
+              <td><small><%= $j->{started_at} // '--' %></small></td>
+              <td><small><%= $j->{finished_at} // '--' %></small></td>
+              <td><small class="text-muted"><%= $j->{message} // '' %></small></td>
+            </tr>
+            % }
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- System Info -->
+    <div class="card mt-3">
+      <div class="card-header bg-white"><h6 class="mb-0"><i class="bi bi-info-circle"></i> System Info</h6></div>
+      <div class="card-body">
+        <div class="row">
+          <div class="col-md-4">
+            <small class="text-muted">Version</small><br>
+            <strong>0.2.0</strong>
+          </div>
+          <div class="col-md-4">
+            <small class="text-muted">Perl</small><br>
+            <strong><%= $^V %></strong>
+          </div>
+          <div class="col-md-4">
+            <small class="text-muted">Worker Poll Interval</small><br>
+            <strong>5 seconds</strong>
+          </div>
+        </div>
+        <div class="row mt-2">
+          <div class="col-md-4">
+            <small class="text-muted">Hostname</small><br>
+            <strong><%= `hostname` =~ s/\n//r %></strong>
+          </div>
+          <div class="col-md-4">
+            <small class="text-muted">OS</small><br>
+            <strong><%= $^O %></strong>
+          </div>
+          <div class="col-md-4">
+            <small class="text-muted">Stale Lock Timeout</small><br>
+            <strong>30 minutes</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <footer class="text-center py-3">
+    git-advanced-multisync &mdash; DEC-LLC
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
