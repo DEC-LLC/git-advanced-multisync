@@ -1,0 +1,16 @@
+Source: git-advanced-multisync
+Section: devel
+Priority: optional
+Maintainer: Madhav Diwan <madhav@decllc.biz>
+Build-Depends: debhelper (>= 12)
+Standards-Version: 4.6.0
+Homepage: https://github.com/DEC-LLC/git-advanced-multisync
+
+Package: git-advanced-multisync
+Architecture: all
+Depends: perl (>= 5.26), libmojolicious-perl, libdbi-perl, libdbd-pg-perl, postgresql, git
+Description: Multi-provider Git repository sync engine with web UI
+ git-advanced-multisync (gitmsyncd) synchronizes Git repositories across
+ GitHub, GitLab, and Gitea through a web interface. Supports one-way and
+ bidirectional sync, auto-discovery, scheduled sync, SSH and HTTPS
+ transport, conflict detection, and per-profile repo management.

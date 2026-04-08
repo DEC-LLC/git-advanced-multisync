@@ -1,0 +1,16 @@
+#!/usr/bin/make -f
+%:
+	dh $@
+
+override_dh_auto_install:
+	mkdir -p $(CURDIR)/debian/git-advanced-multisync/opt/gitmsyncd/{bin,lib/Gitmsyncd,web/templates,web/public,db,docs}
+	mkdir -p $(CURDIR)/debian/git-advanced-multisync/etc/gitmsyncd
+	mkdir -p $(CURDIR)/debian/git-advanced-multisync/lib/systemd/system
+	cp bin/gitmsyncd.pl $(CURDIR)/debian/git-advanced-multisync/opt/gitmsyncd/bin/
+	cp lib/Gitmsyncd/App.pm $(CURDIR)/debian/git-advanced-multisync/opt/gitmsyncd/lib/Gitmsyncd/
+	cp -a web/templates/*.html.ep $(CURDIR)/debian/git-advanced-multisync/opt/gitmsyncd/web/templates/
+	cp db/schema.sql $(CURDIR)/debian/git-advanced-multisync/opt/gitmsyncd/db/
+	cp -a docs/* $(CURDIR)/debian/git-advanced-multisync/opt/gitmsyncd/docs/ 2>/dev/null || true
+	cp cpanfile $(CURDIR)/debian/git-advanced-multisync/opt/gitmsyncd/
+	cp packaging/deb/debian/gitmsyncd.service $(CURDIR)/debian/git-advanced-multisync/lib/systemd/system/
+	cp packaging/deb/debian/gitmsyncd.env $(CURDIR)/debian/git-advanced-multisync/etc/gitmsyncd/gitmsyncd.env

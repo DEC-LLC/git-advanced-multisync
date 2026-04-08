@@ -1,0 +1,11 @@
+git-advanced-multisync (0.2.0-1) stable; urgency=medium
+
+  * Scheduler with per-profile intervals and stagger
+  * SSH transport support with per-provider keys
+  * Profile-based repo management with auto-discover
+  * Queue worker for async job processing
+  * Loop detection (same-provider/same-org blocking)
+  * Bootstrap 5 web UI with 5 pages
+  * Three-provider support: GitHub, GitLab, Gitea
+
+ -- Madhav Diwan <madhav@decllc.biz>  Tue, 08 Apr 2026 17:00:00 -0400
