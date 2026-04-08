@@ -126,6 +126,15 @@ curl http://localhost:9097/api/providers/1/repos?owner=my-org
 curl -X POST http://localhost:9097/api/sync/run/1
 ```
 
+## Roadmap
+
+- **Authentication and RBAC** — Login page with admin and read-only user roles. Admins can add providers, create profiles, and trigger syncs. Read-only users can view status, jobs, and logs.
+- **Chained sync** — Sync a repo across three or more providers in sequence (e.g., GitLab → GitHub → Gitea) in a single profile, with per-hop conflict policies.
+- **Custom provider support** — Add any Git hosting platform that speaks a standard API. Define the API endpoint patterns (repos list, clone URL format, auth header) and use it alongside the built-in GitHub/GitLab/Gitea adapters.
+- **Scheduled sync** — Cron-style schedules per profile. Set it and forget it.
+- **Webhook triggers** — Receive push webhooks from providers and sync immediately on change instead of polling.
+- **Diff preview** — Before syncing, show what commits would be pushed and flag potential conflicts.
+
 ## License
 
 Dual-licensed under MIT and GPLv3. See [LICENSE](Legal/) files for details.
