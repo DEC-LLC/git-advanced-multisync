@@ -45,14 +45,7 @@
     $c->render(json => { ok => Mojo::JSON->true });
   };
 
-  # Auto-discover repos for a provider
-  get '/api/providers/:id/repos' => sub ($c) {
-    my $id = $c->param('id');
-    my $provider = $c->dbh->selectrow_hashref(q{SELECT * FROM providers WHERE id = ?}, undef, $id);
-    unless ($provider) { return $c->render(json => { ok => Mojo::JSON->false, error => 'not found' }, status => 404); }
-    # Placeholder: real implementation calls GitHub/GitLab/Gitea API to list repos
-    $c->render(json => { ok => Mojo::JSON->true, repos => [], message => 'Discovery not yet implemented for this provider.' });
-  };
+  # Auto-discover uses GET /api/providers/:id/repos?owner=<org> defined in App.pm
 %>
 <!doctype html>
 <html lang="en">
@@ -104,14 +97,7 @@
 
     <div class="d-flex justify-content-between align-items-center mb-4">
       <h2 class="mb-0">Repo Mappings</h2>
-      <div class="btn-group">
-        <button class="btn btn-outline-info" data-bs-toggle="modal" data-bs-target="#discoverModal">
-          <i class="bi bi-search"></i> Auto-Discover
-        </button>
-        <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#mappingModal" onclick="openAddMapping()">
-          <i class="bi bi-plus-circle"></i> Add Manual Mapping
-        </button>
-      </div>
+      <small class="text-muted">Read-only view of all repo mappings across profiles. Manage repos from the <a href="/profiles">Profiles</a> page.</small>
     </div>
 
     <!-- Alert area -->
@@ -209,67 +195,66 @@
     <div class="modal-dialog modal-lg">
       <div class="modal-content">
         <div class="modal-header">
-          <h5 class="modal-title">Add Manual Mapping</h5>
+          <h5 class="modal-title">Add Repo Mapping</h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
         </div>
         <div class="modal-body">
           <form id="mappingForm" novalidate>
           <div class="mb-3">
-            <label class="form-label">Profile</label>
-            <select class="form-select" id="mappingProfile">
-              <option value="">-- none (unassigned) --</option>
+            <label class="form-label">Profile <span class="text-danger">*</span></label>
+            <select class="form-select" id="mappingProfile" required onchange="onProfileSelected()">
+              <option value="">-- select a profile --</option>
               % for my $pr (@{$profiles}) {
                 <option value="<%= $pr->{id} %>"><%= $pr->{name} %></option>
               % }
             </select>
-            <div class="form-text text-muted">Optionally assign this mapping to a sync profile. Unassigned mappings must be synced manually.</div>
+            <div class="form-text text-muted">Select a sync profile. The source, target, and direction will be filled from the profile.</div>
+          </div>
+
+          <div id="profileInfo" class="d-none mb-3">
+            <div class="card bg-light">
+              <div class="card-body py-2">
+                <div class="row">
+                  <div class="col-md-4">
+                    <small class="text-muted">Source</small><br>
+                    <strong id="infoSource">—</strong>
+                  </div>
+                  <div class="col-md-1 text-center pt-2">
+                    <span id="infoDirection" class="fs-5">→</span>
+                  </div>
+                  <div class="col-md-4">
+                    <small class="text-muted">Target</small><br>
+                    <strong id="infoTarget">—</strong>
+                  </div>
+                  <div class="col-md-3">
+                    <small class="text-muted">Direction</small><br>
+                    <span id="infoDirectionText">—</span>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
 
           <div class="row mb-3">
-            <div class="col-md-3">
-              <label class="form-label">Source Provider <span class="text-danger">*</span></label>
-              <select class="form-select" id="mappingSourceProvider" required>
-                <option value="github">GitHub</option>
-                <option value="gitlab">GitLab</option>
-                <option value="gitea">Gitea</option>
-              </select>
-              <div class="form-text text-muted">Platform where the source repo lives.</div>
+            <div class="col-md-6">
+              <label class="form-label">Repo Name <span class="text-danger">*</span></label>
+              <input type="text" class="form-control" id="mappingRepoName" placeholder="e.g., hello-sync" required minlength="1">
+              <div class="form-text text-muted">Repository name (without the org/owner prefix). The same name is used on both source and target.</div>
+              <div class="invalid-feedback">Please enter a repo name.</div>
             </div>
-            <div class="col-md-9">
-              <label class="form-label">Source Repo Path <span class="text-danger">*</span></label>
-              <input type="text" class="form-control" id="mappingSourcePath" placeholder="e.g., my-org/my-repo" required pattern="[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+" minlength="3">
-              <div class="form-text text-muted">Full path in <code>owner/repo-name</code> format, e.g. <code>DEC-LLC/my-project</code></div>
-              <div class="invalid-feedback">Please enter a valid repo path in owner/repo format.</div>
+            <div class="col-md-6">
+              <label class="form-label">Target Repo Name <small class="text-muted">(optional, if different)</small></label>
+              <input type="text" class="form-control" id="mappingTargetRepoName" placeholder="Same as source if blank">
+              <div class="form-text text-muted">Leave blank to use the same name. Only fill if the target repo has a different name.</div>
             </div>
           </div>
 
-          <div class="row mb-3">
-            <div class="col-md-3">
-              <label class="form-label">Target Provider <span class="text-danger">*</span></label>
-              <select class="form-select" id="mappingTargetProvider" required>
-                <option value="github">GitHub</option>
-                <option value="gitlab" selected>GitLab</option>
-                <option value="gitea">Gitea</option>
-              </select>
-              <div class="form-text text-muted">Platform where the target repo lives.</div>
-            </div>
-            <div class="col-md-9">
-              <label class="form-label">Target Repo Path <span class="text-danger">*</span></label>
-              <input type="text" class="form-control" id="mappingTargetPath" placeholder="e.g., my-group/my-repo" required pattern="[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+" minlength="3">
-              <div class="form-text text-muted">Full path in <code>owner/repo-name</code> format. Can match source path or differ if renaming.</div>
-              <div class="invalid-feedback">Please enter a valid repo path in owner/repo format.</div>
-            </div>
-          </div>
-
-          <div class="mb-3">
-            <label class="form-label">Direction <span class="text-danger">*</span></label>
-            <select class="form-select" id="mappingDirection" required>
-              <option value="github_to_gitlab">Source &rarr; Target (one-way push)</option>
-              <option value="gitlab_to_github">Target &rarr; Source (one-way pull)</option>
-              <option value="bidirectional">Bidirectional</option>
-            </select>
-            <div class="form-text text-muted">Controls which direction changes flow between the two repos.</div>
-          </div>
+          <!-- Hidden fields populated from profile -->
+          <input type="hidden" id="mappingSourceProvider" value="">
+          <input type="hidden" id="mappingTargetProvider" value="">
+          <input type="hidden" id="mappingDirection" value="">
+          <input type="hidden" id="mappingSourceOwner" value="">
+          <input type="hidden" id="mappingTargetOwner" value="">
 
           <div class="form-check mb-3">
             <input class="form-check-input" type="checkbox" id="mappingEnabled" checked>
@@ -410,31 +395,75 @@
       }
     }
 
+    // Profile data cache for auto-populate
+    var profileCache = {};
+
+    function onProfileSelected() {
+      var profileId = document.getElementById('mappingProfile').value;
+      if (!profileId) {
+        document.getElementById('profileInfo').classList.add('d-none');
+        return;
+      }
+      // Fetch profiles to get source/target info
+      fetch('/api/profiles')
+        .then(function(r) { return r.json(); })
+        .then(function(profiles) {
+          var p = profiles.find(function(pr) { return pr.id == profileId; });
+          if (!p) return;
+          profileCache[profileId] = p;
+          // Populate hidden fields
+          document.getElementById('mappingSourceProvider').value = p.source_provider_type || '';
+          document.getElementById('mappingTargetProvider').value = p.target_provider_type || '';
+          document.getElementById('mappingDirection').value = p.direction || '';
+          document.getElementById('mappingSourceOwner').value = p.source_owner || '';
+          document.getElementById('mappingTargetOwner').value = p.target_owner || '';
+          // Show info card
+          document.getElementById('infoSource').textContent = (p.source_provider_name || '?') + ' / ' + (p.source_owner || '?');
+          document.getElementById('infoTarget').textContent = (p.target_provider_name || '?') + ' / ' + (p.target_owner || '?');
+          var dirMap = { 'github_to_gitlab': '→ One-way', 'gitlab_to_github': '← One-way', 'bidirectional': '↔ Bidirectional' };
+          document.getElementById('infoDirectionText').textContent = dirMap[p.direction] || p.direction;
+          document.getElementById('infoDirection').textContent = p.direction === 'bidirectional' ? '↔' : '→';
+          document.getElementById('profileInfo').classList.remove('d-none');
+        });
+    }
+
     function openAddMapping() {
-      document.getElementById('mappingSourcePath').value = '';
-      document.getElementById('mappingTargetPath').value = '';
+      document.getElementById('mappingRepoName').value = '';
+      document.getElementById('mappingTargetRepoName').value = '';
       document.getElementById('mappingEnabled').checked = true;
       document.getElementById('mappingModalAlert').innerHTML = '';
+      document.getElementById('profileInfo').classList.add('d-none');
+      document.getElementById('mappingProfile').value = '';
       clearValidation();
     }
 
     function saveMapping() {
       var form = document.getElementById('mappingForm');
 
-      // Run Bootstrap validation
       if (!form.checkValidity()) {
         form.classList.add('was-validated');
         return;
       }
 
+      var profileId = document.getElementById('mappingProfile').value;
+      if (!profileId) {
+        document.getElementById('mappingModalAlert').innerHTML = '<div class="alert alert-danger py-2">Please select a profile.</div>';
+        return;
+      }
+
+      var repoName = document.getElementById('mappingRepoName').value.trim();
+      var targetRepoName = document.getElementById('mappingTargetRepoName').value.trim() || repoName;
+      var sourceOwner = document.getElementById('mappingSourceOwner').value;
+      var targetOwner = document.getElementById('mappingTargetOwner').value;
+
       var data = {
         source_provider: document.getElementById('mappingSourceProvider').value,
-        source_full_path: document.getElementById('mappingSourcePath').value.trim(),
+        source_full_path: sourceOwner + '/' + repoName,
         target_provider: document.getElementById('mappingTargetProvider').value,
-        target_full_path: document.getElementById('mappingTargetPath').value.trim(),
+        target_full_path: targetOwner + '/' + targetRepoName,
         direction: document.getElementById('mappingDirection').value,
         enabled: document.getElementById('mappingEnabled').checked,
-        profile_id: parseInt(document.getElementById('mappingProfile').value) || null
+        profile_id: parseInt(profileId)
       };
 
       fetch('/api/mappings', {
@@ -522,9 +551,16 @@
       document.getElementById('btnDiscover').innerHTML = '<span class="spinner-border spinner-border-sm"></span> Discovering...';
       document.getElementById('discoverAlert').innerHTML = '';
 
-      // In a real implementation, this would call the provider API
-      // For now we call a placeholder endpoint
-      fetch('/api/providers/' + profileId + '/repos')
+      // First fetch the profile to get source provider ID and owner
+      fetch('/api/profiles')
+        .then(function(r) { return r.json(); })
+        .then(function(profiles) {
+          var profile = profiles.find(function(p) { return p.id == profileId; });
+          if (!profile || !profile.source_provider_id) {
+            throw new Error('Profile has no source provider configured');
+          }
+          return fetch('/api/providers/' + profile.source_provider_id + '/repos?owner=' + encodeURIComponent(profile.source_owner));
+        })
         .then(function(r) { return r.json(); })
         .then(function(result) {
           if (result.repos && result.repos.length > 0) {

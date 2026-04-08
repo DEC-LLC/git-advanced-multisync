@@ -262,7 +262,7 @@
       document.getElementById('eventLogEmpty').classList.add('d-none');
 
       // Fetch events
-      fetch('/api/jobs/' + jobId + '/events')
+      fetch('/api/sync/jobs/' + jobId)
         .then(function(r) { return r.json(); })
         .then(function(events) {
           if (events.length === 0) {

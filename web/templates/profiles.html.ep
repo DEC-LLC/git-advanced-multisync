@@ -112,6 +112,7 @@
               <th>Target</th>
               <th>Direction</th>
               <th>Conflict Policy</th>
+              <th>Schedule</th>
               <th>Enabled</th>
               <th class="text-end">Actions</th>
             </tr>
@@ -119,7 +120,19 @@
           <tbody>
             % if (@{$profiles}) {
               % for my $p (@{$profiles}) {
-              <tr>
+              <tr id="profile-row-<%= $p->{id} %>" class="profile-row" style="cursor:pointer"
+                  onclick="selectProfile(<%= $p->{id} %>)"
+                  data-id="<%= $p->{id} %>"
+                  data-name="<%= $p->{name} %>"
+                  data-direction="<%= $p->{direction} %>"
+                  data-source-owner="<%= $p->{source_owner} %>"
+                  data-target-owner="<%= $p->{target_owner} %>"
+                  data-source-provider-id="<%= $p->{source_provider_id} // '' %>"
+                  data-target-provider-id="<%= $p->{target_provider_id} // '' %>"
+                  data-source-name="<%= $p->{source_name} // '?' %>"
+                  data-target-name="<%= $p->{target_name} // '?' %>"
+                  data-conflict-policy="<%= $p->{conflict_policy} // 'ff-only' %>"
+                  data-enabled="<%= $p->{enabled} ? '1' : '0' %>">
                 <td><%= $p->{id} %></td>
                 <td><strong><%= $p->{name} %></strong></td>
                 <td>
@@ -133,9 +146,9 @@
                 <td>
                   % my $dir = $p->{direction} // '';
                   % if ($dir eq 'github_to_gitlab') {
-                    <i class="bi bi-arrow-right"></i> GitHub &rarr; GitLab
+                    <i class="bi bi-arrow-right"></i> Source &rarr; Target
                   % } elsif ($dir eq 'gitlab_to_github') {
-                    <i class="bi bi-arrow-left"></i> GitLab &rarr; GitHub
+                    <i class="bi bi-arrow-left"></i> Target &rarr; Source
                   % } elsif ($dir eq 'bidirectional') {
                     <i class="bi bi-arrow-left-right"></i> Bidirectional
                   % } else {
@@ -144,18 +157,31 @@
                 </td>
                 <td><code><%= $p->{conflict_policy} // 'ff-only' %></code></td>
                 <td>
+                  % my $intv = $p->{sync_interval_minutes};
+                  % if ($intv && $intv > 0) {
+                    % if ($intv < 60) {
+                      <span class="badge bg-info text-dark"><i class="bi bi-clock"></i> <%= $intv %>min</span>
+                    % } elsif ($intv == 60) {
+                      <span class="badge bg-info text-dark"><i class="bi bi-clock"></i> hourly</span>
+                    % } elsif ($intv < 1440) {
+                      <span class="badge bg-info text-dark"><i class="bi bi-clock"></i> <%= $intv / 60 %>hr</span>
+                    % } else {
+                      <span class="badge bg-info text-dark"><i class="bi bi-clock"></i> daily</span>
+                    % }
+                  % } else {
+                    <span class="text-muted">manual</span>
+                  % }
+                </td>
+                <td>
                   % if ($p->{enabled}) {
                     <span class="badge bg-success">Yes</span>
                   % } else {
                     <span class="badge bg-secondary">No</span>
                   % }
                 </td>
-                <td class="text-end">
-                  <button class="btn btn-sm btn-outline-success" onclick="syncProfile(<%= $p->{id} %>)" title="Sync Now">
-                    <i class="bi bi-arrow-repeat"></i>
-                  </button>
+                <td class="text-end" onclick="event.stopPropagation()">
                   <button class="btn btn-sm btn-outline-primary" title="Edit"
-                    onclick="openEditProfile(<%= $p->{id} %>, '<%= $p->{name} =~ s/'/\\'/gr %>', '<%= $p->{direction} %>', '<%= $p->{source_owner} %>', '<%= $p->{target_owner} %>', '<%= $p->{source_provider_id} // '' %>', '<%= $p->{target_provider_id} // '' %>', '<%= $p->{conflict_policy} // 'ff-only' %>', <%= $p->{enabled} ? 'true' : 'false' %>)">
+                    onclick="openEditProfile(<%= $p->{id} %>, '<%= $p->{name} =~ s/'/\\'/gr %>', '<%= $p->{direction} %>', '<%= $p->{source_owner} %>', '<%= $p->{target_owner} %>', '<%= $p->{source_provider_id} // '' %>', '<%= $p->{target_provider_id} // '' %>', '<%= $p->{conflict_policy} // 'ff-only' %>', <%= $p->{enabled} ? 'true' : 'false' %>, '<%= $p->{sync_interval_minutes} // '' %>')">
                     <i class="bi bi-pencil"></i>
                   </button>
                   <button class="btn btn-sm btn-outline-danger" onclick="deleteProfile(<%= $p->{id} %>, '<%= $p->{name} =~ s/'/\\'/gr %>')" title="Delete">
@@ -169,6 +195,95 @@
             % }
           </tbody>
         </table>
+      </div>
+    </div>
+
+    <!-- Profile Detail Panel — Repos Management -->
+    <div id="profileDetail" class="d-none mt-4">
+      <div class="card border-primary">
+        <div class="card-header bg-white d-flex justify-content-between align-items-center">
+          <div>
+            <h5 class="mb-0" id="detailProfileName">—</h5>
+            <small class="text-muted" id="detailSummary">—</small>
+          </div>
+          <div class="d-flex gap-2">
+            <button class="btn btn-success btn-sm" onclick="confirmSyncSelected()">
+              <i class="bi bi-arrow-repeat"></i> Sync Now
+            </button>
+          </div>
+        </div>
+        <div class="card-body">
+
+          <!-- Add repos controls -->
+          <div class="d-flex gap-2 mb-3 flex-wrap">
+            <button class="btn btn-info btn-sm" onclick="discoverRepos()">
+              <i class="bi bi-search"></i> Auto-Discover Repos
+            </button>
+            <button class="btn btn-outline-primary btn-sm" data-bs-toggle="collapse" data-bs-target="#addRepoInline">
+              <i class="bi bi-plus"></i> Add Repo by Name
+            </button>
+          </div>
+
+          <!-- Inline add repo form -->
+          <div class="collapse mb-3" id="addRepoInline">
+            <div class="card card-body bg-light">
+              <div class="row g-2 align-items-end">
+                <div class="col-md-5">
+                  <label class="form-label fw-semibold">Repo Name <span class="text-danger">*</span></label>
+                  <input type="text" class="form-control" id="addRepoName" placeholder="e.g., hello-sync">
+                  <div class="form-text">Just the repo name. The org/owner prefix comes from the profile.</div>
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label fw-semibold">Target Name <small class="text-muted">(if different)</small></label>
+                  <input type="text" class="form-control" id="addRepoTargetName" placeholder="Same as source if blank">
+                </div>
+                <div class="col-md-3">
+                  <button class="btn btn-primary w-100" onclick="addRepoToProfile()">
+                    <i class="bi bi-plus-circle"></i> Add
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Auto-discover results -->
+          <div id="discoverPanel" class="d-none mb-3">
+            <div class="card card-body border-info">
+              <div class="d-flex justify-content-between align-items-center mb-2">
+                <h6 class="mb-0"><i class="bi bi-search"></i> Discovered Repos</h6>
+                <div>
+                  <label class="form-check-label me-2"><input type="checkbox" id="selectAllDiscover" onchange="toggleAllDiscover()" class="form-check-input"> Select All</label>
+                  <button class="btn btn-success btn-sm" onclick="addDiscoveredRepos()">
+                    <i class="bi bi-plus-circle"></i> Add Selected
+                  </button>
+                  <button class="btn btn-outline-secondary btn-sm ms-1" onclick="document.getElementById('discoverPanel').classList.add('d-none')">
+                    Close
+                  </button>
+                </div>
+              </div>
+              <div id="discoverList"></div>
+              <div id="discoverStatus" class="text-muted mt-2"></div>
+            </div>
+          </div>
+
+          <!-- Current repos table -->
+          <h6><i class="bi bi-collection"></i> Synced Repos <span id="repoCount" class="badge bg-primary ms-1">0</span></h6>
+          <table class="table table-sm table-striped table-hover" id="reposTable">
+            <thead class="table-light">
+              <tr>
+                <th>Repo</th>
+                <th>Source Path</th>
+                <th>Target Path</th>
+                <th>Enabled</th>
+                <th class="text-end">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="reposBody">
+              <tr id="noReposRow"><td colspan="5" class="text-center text-muted py-3">No repos configured. Use Auto-Discover or Add Repo by Name.</td></tr>
+            </tbody>
+          </table>
+
+        </div>
       </div>
     </div>
 
@@ -262,10 +377,28 @@
             </div>
           </div>
 
+          <div class="mb-3">
+            <label class="form-label">Sync Schedule</label>
+            <select class="form-select" id="profileSyncInterval">
+              <option value="">Manual only (no schedule)</option>
+              <option value="5">Every 5 minutes</option>
+              <option value="15">Every 15 minutes</option>
+              <option value="30">Every 30 minutes</option>
+              <option value="60">Every hour</option>
+              <option value="240">Every 4 hours</option>
+              <option value="720">Every 12 hours</option>
+              <option value="1440">Every 24 hours</option>
+            </select>
+            <div class="form-text text-muted">
+              How often to automatically sync. Syncs are staggered so profiles don't all run at the same time.
+              Manual sync is always available regardless of schedule.
+            </div>
+          </div>
+
           <div class="form-check mb-3">
             <input class="form-check-input" type="checkbox" id="profileEnabled" checked>
             <label class="form-check-label" for="profileEnabled">Enabled</label>
-            <div class="form-text text-muted">Disabled profiles are skipped during "Sync All" operations.</div>
+            <div class="form-text text-muted">Disabled profiles are skipped during scheduled and "Sync All" operations.</div>
           </div>
           </form>
 
@@ -389,12 +522,13 @@
       document.getElementById('profileTargetOwner').value = '';
       document.getElementById('profileDirection').value = 'github_to_gitlab';
       document.getElementById('profileConflictPolicy').value = 'ff-only';
+      document.getElementById('profileSyncInterval').value = '';
       document.getElementById('profileEnabled').checked = true;
       document.getElementById('modalAlert').innerHTML = '';
       clearValidation();
     }
 
-    function openEditProfile(id, name, direction, srcOwner, tgtOwner, srcProv, tgtProv, policy, enabled) {
+    function openEditProfile(id, name, direction, srcOwner, tgtOwner, srcProv, tgtProv, policy, enabled, interval) {
       document.getElementById('profileModalTitle').textContent = 'Edit Profile';
       document.getElementById('editProfileId').value = id;
       document.getElementById('profileName').value = name;
@@ -404,6 +538,7 @@
       document.getElementById('profileTargetOwner').value = tgtOwner;
       document.getElementById('profileDirection').value = direction;
       document.getElementById('profileConflictPolicy').value = policy;
+      document.getElementById('profileSyncInterval').value = interval || '';
       document.getElementById('profileEnabled').checked = enabled;
       document.getElementById('modalAlert').innerHTML = '';
       clearValidation();
@@ -428,8 +563,35 @@
         source_provider_id: parseInt(document.getElementById('profileSourceProvider').value) || null,
         target_provider_id: parseInt(document.getElementById('profileTargetProvider').value) || null,
         conflict_policy: document.getElementById('profileConflictPolicy').value,
+        sync_interval_minutes: parseInt(document.getElementById('profileSyncInterval').value) || null,
         enabled: document.getElementById('profileEnabled').checked
       };
+
+      // ── Loop/collision detection ──
+      if (data.source_provider_id && data.target_provider_id) {
+        // Same provider + same org = guaranteed loop → block
+        if (data.source_provider_id === data.target_provider_id && data.source_owner === data.target_owner) {
+          document.getElementById('modalAlert').innerHTML =
+            '<div class="alert alert-danger py-2">' +
+            '<i class="bi bi-exclamation-triangle"></i> <strong>Blocked:</strong> Source and target are the same provider and the same org/owner. ' +
+            'This would sync a repo to itself. Choose a different target org or a different provider.' +
+            '</div>';
+          return;
+        }
+        // Same provider + different org = valid but warn
+        if (data.source_provider_id === data.target_provider_id) {
+          var existingWarn = document.getElementById('sameProviderWarn');
+          if (!existingWarn) {
+            document.getElementById('modalAlert').innerHTML =
+              '<div class="alert alert-warning py-2" id="sameProviderWarn">' +
+              '<i class="bi bi-info-circle"></i> <strong>Note:</strong> Source and target are on the same provider with different orgs. ' +
+              'This is valid (e.g., forking between orgs), but make sure you intend to sync within the same platform. ' +
+              '<br><button class="btn btn-sm btn-warning mt-1" onclick="document.getElementById(\'sameProviderWarn\').remove(); saveProfile();">Yes, continue saving</button>' +
+              '</div>';
+            return;
+          }
+        }
+      }
 
       var url = id ? '/api/profiles/' + id : '/api/profiles';
       var method = id ? 'PUT' : 'POST';
@@ -512,6 +674,238 @@
       area.innerHTML = '<div class="alert alert-' + type + ' alert-dismissible fade show">' +
         msg + '<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>';
       setTimeout(function() { area.innerHTML = ''; }, 5000);
+    }
+
+    // ── Profile Detail Panel (Repos Management) ─────────────────────
+
+    var selectedProfileId = null;
+    var selectedProfileData = null;
+
+    function selectProfile(id) {
+      selectedProfileId = id;
+      var row = document.getElementById('profile-row-' + id);
+      if (!row) return;
+
+      // Read profile data from data attributes
+      selectedProfileData = {
+        id: id,
+        name: row.dataset.name,
+        direction: row.dataset.direction,
+        source_owner: row.dataset.sourceOwner,
+        target_owner: row.dataset.targetOwner,
+        source_provider_id: row.dataset.sourceProviderId,
+        target_provider_id: row.dataset.targetProviderId,
+        source_name: row.dataset.sourceName,
+        target_name: row.dataset.targetName,
+        conflict_policy: row.dataset.conflictPolicy
+      };
+
+      // Highlight selected row
+      document.querySelectorAll('.profile-row').forEach(function(r) { r.classList.remove('table-active'); });
+      row.classList.add('table-active');
+
+      // Populate detail panel
+      document.getElementById('detailProfileName').textContent = selectedProfileData.name;
+      var dirLabel = { 'github_to_gitlab': '→ One-way', 'gitlab_to_github': '← One-way', 'bidirectional': '↔ Bidirectional' };
+      document.getElementById('detailSummary').textContent =
+        selectedProfileData.source_name + ' / ' + selectedProfileData.source_owner +
+        ' ' + (dirLabel[selectedProfileData.direction] || selectedProfileData.direction) +
+        ' ' + selectedProfileData.target_name + ' / ' + selectedProfileData.target_owner +
+        ' | Policy: ' + selectedProfileData.conflict_policy;
+
+      // Show panel and load repos
+      document.getElementById('profileDetail').classList.remove('d-none');
+      document.getElementById('discoverPanel').classList.add('d-none');
+      loadProfileRepos();
+
+      // Scroll to detail
+      document.getElementById('profileDetail').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    function loadProfileRepos() {
+      fetch('/api/mappings')
+        .then(function(r) { return r.json(); })
+        .then(function(mappings) {
+          var filtered = mappings.filter(function(m) { return m.profile_id == selectedProfileId; });
+          var tbody = document.getElementById('reposBody');
+          document.getElementById('repoCount').textContent = filtered.length;
+
+          if (filtered.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3">No repos configured. Use Auto-Discover or Add Repo by Name.</td></tr>';
+            return;
+          }
+
+          tbody.innerHTML = filtered.map(function(m) {
+            var repoName = m.source_full_path.split('/').pop();
+            return '<tr>' +
+              '<td><strong>' + repoName + '</strong></td>' +
+              '<td><code>' + m.source_full_path + '</code></td>' +
+              '<td><code>' + m.target_full_path + '</code></td>' +
+              '<td>' +
+                '<button class="btn btn-sm ' + (m.enabled ? 'btn-success' : 'btn-outline-secondary') + '" onclick="toggleRepoEnabled(' + m.id + ', ' + !m.enabled + ')">' +
+                (m.enabled ? '<i class="bi bi-check-circle"></i> Yes' : '<i class="bi bi-x-circle"></i> No') +
+                '</button>' +
+              '</td>' +
+              '<td class="text-end">' +
+                '<button class="btn btn-sm btn-outline-danger" onclick="deleteRepoMapping(' + m.id + ', \'' + repoName + '\')"><i class="bi bi-trash"></i></button>' +
+              '</td>' +
+              '</tr>';
+          }).join('');
+        });
+    }
+
+    function toggleRepoEnabled(mappingId, newState) {
+      fetch('/api/mappings/' + mappingId, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: newState })
+      }).then(function() { loadProfileRepos(); });
+    }
+
+    function deleteRepoMapping(mappingId, repoName) {
+      if (!confirm('Remove "' + repoName + '" from this profile?')) return;
+      fetch('/api/mappings/' + mappingId, { method: 'DELETE' })
+        .then(function(r) { return r.json(); })
+        .then(function() {
+          showAlert('Removed "' + repoName + '".', 'success');
+          loadProfileRepos();
+        });
+    }
+
+    // ── Auto-Discover ───────────────────────────────────────────────
+
+    function discoverRepos() {
+      if (!selectedProfileData) return;
+      var btn = event.currentTarget;
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Discovering...';
+
+      fetch('/api/providers/' + selectedProfileData.source_provider_id + '/repos?owner=' + encodeURIComponent(selectedProfileData.source_owner))
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+          btn.disabled = false;
+          btn.innerHTML = '<i class="bi bi-search"></i> Auto-Discover Repos';
+
+          var repos = result.repos || [];
+          if (repos.length === 0) {
+            showAlert('No repos found in "' + selectedProfileData.source_owner + '" on ' + selectedProfileData.source_name, 'warning');
+            return;
+          }
+
+          // Also load existing mappings to show which are already added
+          fetch('/api/mappings').then(function(r) { return r.json(); }).then(function(mappings) {
+            var existing = mappings.filter(function(m) { return m.profile_id == selectedProfileId; })
+              .map(function(m) { return m.source_full_path; });
+
+            var html = repos.map(function(repo) {
+              var alreadyAdded = existing.indexOf(selectedProfileData.source_owner + '/' + repo.name) >= 0;
+              return '<div class="form-check mb-1">' +
+                '<input class="form-check-input discover-cb" type="checkbox" value="' + repo.name + '"' +
+                (alreadyAdded ? ' disabled checked' : ' checked') + '>' +
+                '<label class="form-check-label">' +
+                  '<code>' + repo.name + '</code>' +
+                  (alreadyAdded ? ' <span class="badge bg-secondary ms-1">already added</span>' : '') +
+                  (repo.private ? ' <span class="badge bg-warning text-dark ms-1">private</span>' : '') +
+                '</label>' +
+                '</div>';
+            }).join('');
+
+            document.getElementById('discoverList').innerHTML = html;
+            var newCount = repos.length - existing.length;
+            document.getElementById('discoverStatus').textContent = repos.length + ' repo(s) found, ' + existing.length + ' already added, ' + Math.max(0, newCount) + ' new.';
+            document.getElementById('discoverPanel').classList.remove('d-none');
+          });
+        })
+        .catch(function(err) {
+          btn.disabled = false;
+          btn.innerHTML = '<i class="bi bi-search"></i> Auto-Discover Repos';
+          showAlert('Discovery failed: ' + err.message, 'danger');
+        });
+    }
+
+    function toggleAllDiscover() {
+      var checked = document.getElementById('selectAllDiscover').checked;
+      document.querySelectorAll('.discover-cb:not(:disabled)').forEach(function(cb) { cb.checked = checked; });
+    }
+
+    function addDiscoveredRepos() {
+      var checks = document.querySelectorAll('.discover-cb:checked:not(:disabled)');
+      if (checks.length === 0) { showAlert('No repos selected.', 'warning'); return; }
+
+      var promises = Array.from(checks).map(function(cb) {
+        var repoName = cb.value;
+        return fetch('/api/mappings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            source_provider: selectedProfileData.source_name,
+            source_full_path: selectedProfileData.source_owner + '/' + repoName,
+            target_provider: selectedProfileData.target_name,
+            target_full_path: selectedProfileData.target_owner + '/' + repoName,
+            direction: selectedProfileData.direction,
+            enabled: true,
+            profile_id: selectedProfileId
+          })
+        });
+      });
+
+      Promise.all(promises).then(function() {
+        document.getElementById('discoverPanel').classList.add('d-none');
+        showAlert(checks.length + ' repo(s) added to profile.', 'success');
+        loadProfileRepos();
+      }).catch(function(err) {
+        showAlert('Error adding repos: ' + err.message, 'danger');
+      });
+    }
+
+    // ── Add Repo by Name ────────────────────────────────────────────
+
+    function addRepoToProfile() {
+      var name = document.getElementById('addRepoName').value.trim();
+      if (!name) { showAlert('Enter a repo name.', 'warning'); return; }
+      var targetName = document.getElementById('addRepoTargetName').value.trim() || name;
+
+      fetch('/api/mappings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source_provider: selectedProfileData.source_name,
+          source_full_path: selectedProfileData.source_owner + '/' + name,
+          target_provider: selectedProfileData.target_name,
+          target_full_path: selectedProfileData.target_owner + '/' + targetName,
+          direction: selectedProfileData.direction,
+          enabled: true,
+          profile_id: selectedProfileId
+        })
+      })
+      .then(function(r) { return r.json(); })
+      .then(function(result) {
+        if (!result.error) {
+          document.getElementById('addRepoName').value = '';
+          document.getElementById('addRepoTargetName').value = '';
+          showAlert('Repo "' + name + '" added.', 'success');
+          loadProfileRepos();
+        } else {
+          showAlert('Failed: ' + result.error, 'danger');
+        }
+      });
+    }
+
+    // ── Sync from Detail Panel ──────────────────────────────────────
+
+    function confirmSyncSelected() {
+      if (!selectedProfileId) return;
+      if (!confirm('Run sync for profile "' + selectedProfileData.name + '"?\n\nThis will clone from source and push to target for all enabled repos.')) return;
+      fetch('/api/sync/run/' + selectedProfileId, { method: 'POST' })
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+          if (!result.error) {
+            showAlert('Sync started for "' + selectedProfileData.name + '". Check the Jobs page for status.', 'success');
+          } else {
+            showAlert('Sync failed: ' + result.error, 'danger');
+          }
+        })
+        .catch(function(err) { showAlert('Error: ' + err.message, 'danger'); });
     }
   </script>
 </body>

@@ -135,6 +135,8 @@ curl -X POST http://localhost:9097/api/sync/run/1
 - **Webhook triggers** — Receive push webhooks from providers and sync immediately on change instead of polling.
 - **Diff preview** — Before syncing, show what commits would be pushed and flag potential conflicts.
 - **Issue and PR/MR sync** — Synchronize issues, pull requests, and merge requests across providers. Map labels, milestones, assignees, and comments between GitHub Issues/PRs, GitLab Issues/MRs, and Gitea Issues/PRs. Bidirectional with loop prevention so a synced comment doesn't bounce back as a duplicate.
+- **SSH key trust terminal** — One-time interactive SSH session through the web UI to accept host keys for SSH-based sync. Secure WebSocket terminal, used once per provider, then trusted forever.
+- **Windows support** — Perl runs on Windows via Strawberry Perl or WSL. Package as a portable Windows distribution with bundled dependencies.
 
 ## License
 

@@ -30,10 +30,10 @@ sub start {
     $c->render(json => { status => 'ok' });
   };
 
-  # ── Mappings (legacy) ──────────────────────────────────────────────
+  # ── Mappings CRUD ──────────────────────────────────────────────────
   get '/api/mappings' => sub ($c) {
     my $rows = $c->dbh->selectall_arrayref(
-      q{SELECT id, source_full_path, target_full_path, direction, enabled FROM repo_mappings ORDER BY id},
+      q{SELECT id, source_provider, source_full_path, target_provider, target_full_path, direction, enabled, profile_id FROM repo_mappings ORDER BY id},
       { Slice => {} }
     );
     $c->render(json => $rows);
@@ -42,13 +42,33 @@ sub start {
   post '/api/mappings' => sub ($c) {
     my $p = $c->req->json || {};
     $c->dbh->do(
-      q{INSERT INTO repo_mappings (source_provider, source_full_path, target_provider, target_full_path, direction, enabled)
-        VALUES (?, ?, ?, ?, ?, COALESCE(?, TRUE))},
+      q{INSERT INTO repo_mappings (source_provider, source_full_path, target_provider, target_full_path, direction, enabled, profile_id)
+        VALUES (?, ?, ?, ?, ?, COALESCE(?, TRUE), ?)},
       undef,
       $p->{source_provider}, $p->{source_full_path},
       $p->{target_provider}, $p->{target_full_path},
-      $p->{direction}, $p->{enabled}
+      $p->{direction}, $p->{enabled}, $p->{profile_id}
     );
+    $c->render(json => { ok => Mojo::JSON->true });
+  };
+
+  put '/api/mappings/:id' => sub ($c) {
+    my $id = $c->param('id');
+    my $p  = $c->req->json || {};
+    my @sets;
+    my @vals;
+    for my $k (qw(source_provider source_full_path target_provider target_full_path direction enabled profile_id)) {
+      if (exists $p->{$k}) { push @sets, "$k = ?"; push @vals, $p->{$k}; }
+    }
+    return $c->render(json => { error => 'nothing to update' }, status => 400) unless @sets;
+    push @vals, $id;
+    $c->dbh->do("UPDATE repo_mappings SET " . join(', ', @sets) . " WHERE id = ?", undef, @vals);
+    $c->render(json => { ok => Mojo::JSON->true });
+  };
+
+  del '/api/mappings/:id' => sub ($c) {
+    my $id = $c->param('id');
+    $c->dbh->do(q{DELETE FROM repo_mappings WHERE id = ?}, undef, $id);
     $c->render(json => { ok => Mojo::JSON->true });
   };
 
@@ -196,6 +216,7 @@ sub start {
       q{SELECT sp.id, sp.name, sp.direction, sp.source_owner, sp.target_owner,
                sp.source_provider_id, sp.target_provider_id,
                sp.conflict_policy, sp.enabled, sp.created_at,
+               sp.sync_interval_minutes, sp.next_sync_at, sp.last_synced_at,
                src.name AS source_provider_name, src.provider_type AS source_provider_type,
                tgt.name AS target_provider_name, tgt.provider_type AS target_provider_type
         FROM sync_profiles sp
@@ -212,14 +233,27 @@ sub start {
     for my $f (qw(name direction source_owner target_owner)) {
       return $c->render(json => { error => "missing required field: $f" }, status => 400) unless $p->{$f};
     }
+    # Block same provider + same org (would sync repo to itself)
+    if ($p->{source_provider_id} && $p->{target_provider_id}
+        && $p->{source_provider_id} eq $p->{target_provider_id}
+        && $p->{source_owner} eq $p->{target_owner}) {
+      return $c->render(json => { error => "Source and target are the same provider and org — this would sync a repo to itself." }, status => 400);
+    }
     eval {
+      # Calculate staggered next_sync_at if interval is set
+      my $interval = $p->{sync_interval_minutes};
+      my $next_sync = undef;
+      if ($interval && $interval > 0) {
+        my $stagger = int(rand($interval * 60)); # random offset in seconds
+        $next_sync = strftime('%Y-%m-%d %H:%M:%S', localtime(time + $stagger));
+      }
       $c->dbh->do(
-        q{INSERT INTO sync_profiles (name, direction, source_owner, target_owner, source_provider_id, target_provider_id, conflict_policy, enabled)
-          VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 'ff-only'), COALESCE(?, TRUE))},
+        q{INSERT INTO sync_profiles (name, direction, source_owner, target_owner, source_provider_id, target_provider_id, conflict_policy, enabled, sync_interval_minutes, next_sync_at)
+          VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 'ff-only'), COALESCE(?, TRUE), ?, ?)},
         undef,
         $p->{name}, $p->{direction}, $p->{source_owner}, $p->{target_owner},
         $p->{source_provider_id}, $p->{target_provider_id},
-        $p->{conflict_policy}, $p->{enabled}
+        $p->{conflict_policy}, $p->{enabled}, $interval, $next_sync
       );
     };
     if ($@) {
@@ -227,6 +261,34 @@ sub start {
     }
     my $row = $c->dbh->selectrow_hashref(q{SELECT id, name, direction, source_owner, target_owner, source_provider_id, target_provider_id, conflict_policy, enabled FROM sync_profiles WHERE name = ?}, undef, $p->{name});
     $c->render(json => $row, status => 201);
+  };
+
+  put '/api/profiles/:id' => sub ($c) {
+    my $id = $c->param('id');
+    my $p  = $c->req->json || {};
+    my $existing = $c->dbh->selectrow_hashref(q{SELECT id FROM sync_profiles WHERE id = ?}, undef, $id);
+    return $c->render(json => { error => 'profile not found' }, status => 404) unless $existing;
+    my @sets;
+    my @vals;
+    for my $k (qw(name direction source_owner target_owner source_provider_id target_provider_id conflict_policy enabled sync_interval_minutes)) {
+      if (exists $p->{$k}) { push @sets, "$k = ?"; push @vals, $p->{$k}; }
+    }
+    # If interval changed, recalculate next_sync_at
+    if (exists $p->{sync_interval_minutes}) {
+      my $interval = $p->{sync_interval_minutes};
+      if ($interval && $interval > 0) {
+        my $stagger = int(rand(60)); # small random offset
+        my $next = strftime('%Y-%m-%d %H:%M:%S', localtime(time + $stagger));
+        push @sets, "next_sync_at = ?";
+        push @vals, $next;
+      } else {
+        push @sets, "next_sync_at = NULL";
+      }
+    }
+    return $c->render(json => { error => 'nothing to update' }, status => 400) unless @sets;
+    push @vals, $id;
+    $c->dbh->do("UPDATE sync_profiles SET " . join(', ', @sets) . " WHERE id = ?", undef, @vals);
+    $c->render(json => { ok => Mojo::JSON->true });
   };
 
   del '/api/profiles/:id' => sub ($c) {
@@ -374,13 +436,20 @@ sub start {
         return "https://$token\@github.com/$full_path.git";
       } elsif ($type eq 'gitlab') {
         my $base = $base_url || 'https://gitlab.com';
-        $base =~ s{https?://}{};
         $base =~ s{/+$}{};
+        if ($base =~ m{^(https?)://(.+)}) {
+          my ($scheme, $host) = ($1, $2);
+          return "$scheme://oauth2:$token\@$host/$full_path.git";
+        }
         return "https://oauth2:$token\@$base/$full_path.git";
       } elsif ($type eq 'gitea') {
         my $base = $base_url || 'https://gitea.com';
-        $base =~ s{https?://}{};
         $base =~ s{/+$}{};
+        # Preserve http/https from the base_url
+        if ($base =~ m{^(https?)://(.+)}) {
+          my ($scheme, $host) = ($1, $2);
+          return "$scheme://$token\@$host/$full_path.git";
+        }
         return "https://$token\@$base/$full_path.git";
       }
       return undef;
@@ -529,6 +598,194 @@ sub start {
     $c->stash(jobs => $jobs);
     $c->render(template => 'jobs');
   };
+
+  # ── Sync Engine (shared by queue worker and direct run) ─────────
+
+  my $run_sync_job = sub {
+    my ($dbh, $job_id, $profile_id) = @_;
+
+    $dbh->do(q{UPDATE sync_jobs SET status='running', message='picked up by worker' WHERE id=?}, undef, $job_id);
+
+    my $log_event = sub {
+      my ($level, $msg) = @_;
+      eval { $dbh->do(q{INSERT INTO sync_job_events (job_id, level, message) VALUES (?, ?, ?)}, undef, $job_id, $level, $msg); };
+    };
+
+    # Load profile with providers (including SSH settings)
+    my $profile = $dbh->selectrow_hashref(
+      q{SELECT sp.*,
+               src.provider_type AS src_type, src.base_url AS src_base_url, src.api_token AS src_token,
+               src.clone_protocol AS src_clone_proto, src.ssh_key_path AS src_ssh_key,
+               tgt.provider_type AS tgt_type, tgt.base_url AS tgt_base_url, tgt.api_token AS tgt_token,
+               tgt.push_protocol AS tgt_push_proto, tgt.ssh_key_path AS tgt_ssh_key
+        FROM sync_profiles sp
+        JOIN providers src ON sp.source_provider_id = src.id
+        JOIN providers tgt ON sp.target_provider_id = tgt.id
+        WHERE sp.id = ?}, undef, $profile_id
+    );
+
+    unless ($profile) {
+      $log_event->('error', 'profile not found or providers missing');
+      $dbh->do(q{UPDATE sync_jobs SET status='failed', finished_at=NOW(), message='profile not found' WHERE id=?}, undef, $job_id);
+      return;
+    }
+
+    my @mappings = @{ $dbh->selectall_arrayref(
+      q{SELECT * FROM repo_mappings WHERE profile_id = ? AND enabled = TRUE}, { Slice => {} }, $profile_id
+    ) || [] };
+
+    unless (@mappings) {
+      $log_event->('warn', 'no active repo mappings found for this profile');
+      $dbh->do(q{UPDATE sync_jobs SET status='success', finished_at=NOW(), message='no mappings to sync' WHERE id=?}, undef, $job_id);
+      return;
+    }
+
+    $log_event->('info', "found " . scalar(@mappings) . " repo mapping(s) to sync");
+
+    # Build clone/push URL — supports both HTTPS (token) and SSH (key)
+    my $build_url = sub {
+      my ($type, $base_url, $token, $full_path, $protocol) = @_;
+      $protocol ||= 'https';
+
+      if ($protocol eq 'ssh') {
+        # SSH URLs
+        if ($type eq 'github') {
+          return "git\@github.com:$full_path.git";
+        } elsif ($type eq 'gitlab') {
+          my $base = $base_url || 'https://gitlab.com';
+          my ($host) = $base =~ m{https?://([^/:]+)};
+          $host ||= 'gitlab.com';
+          return "git\@$host:$full_path.git";
+        } elsif ($type eq 'gitea') {
+          my $base = $base_url || 'https://gitea.com';
+          my ($host) = $base =~ m{https?://([^/:]+)};
+          my ($port) = $base =~ m{:(\d+)};
+          $host ||= 'gitea.com';
+          if ($port && $port ne '22') {
+            return "ssh://git\@$host:$port/$full_path.git";
+          }
+          return "git\@$host:$full_path.git";
+        }
+      }
+
+      # HTTPS URLs
+      if ($type eq 'github') {
+        return "https://$token\@github.com/$full_path.git";
+      } elsif ($type eq 'gitlab') {
+        my $base = $base_url || 'https://gitlab.com';
+        $base =~ s{/+$}{};
+        if ($base =~ m{^(https?)://(.+)}) { return "$1://oauth2:$token\@$2/$full_path.git"; }
+        return "https://oauth2:$token\@$base/$full_path.git";
+      } elsif ($type eq 'gitea') {
+        my $base = $base_url || 'https://gitea.com';
+        $base =~ s{/+$}{};
+        if ($base =~ m{^(https?)://(.+)}) { return "$1://$token\@$2/$full_path.git"; }
+        return "https://$token\@$base/$full_path.git";
+      }
+      return undef;
+    };
+
+    my $workdir = '/tmp/gitmsyncd-workdir';
+    make_path($workdir) unless -d $workdir;
+    my ($synced, $failed) = (0, 0);
+
+    # Set up SSH command if source uses SSH
+    my $src_proto = $profile->{src_clone_proto} || 'https';
+    my $tgt_proto = $profile->{tgt_push_proto} || 'https';
+    my $src_ssh_cmd = '';
+    my $tgt_ssh_cmd = '';
+
+    if ($src_proto eq 'ssh' && $profile->{src_ssh_key}) {
+      $src_ssh_cmd = "GIT_SSH_COMMAND='ssh -i $profile->{src_ssh_key} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no'";
+    }
+    if ($tgt_proto eq 'ssh' && $profile->{tgt_ssh_key}) {
+      $tgt_ssh_cmd = "GIT_SSH_COMMAND='ssh -i $profile->{tgt_ssh_key} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no'";
+    }
+
+    for my $m (@mappings) {
+      my $src_url = $build_url->($profile->{src_type}, $profile->{src_base_url}, $profile->{src_token}, $m->{source_full_path}, $src_proto);
+      my $tgt_url = $build_url->($profile->{tgt_type}, $profile->{tgt_base_url}, $profile->{tgt_token}, $m->{target_full_path}, $tgt_proto);
+
+      unless ($src_url && $tgt_url) {
+        $log_event->('error', "cannot build URLs for $m->{source_full_path}");
+        $failed++; next;
+      }
+
+      (my $dir_name = $m->{source_full_path}) =~ s{/}{--}g;
+      my $repo_dir = File::Spec->catdir($workdir, "$dir_name.git");
+
+      $log_event->('info', "syncing $m->{source_full_path} -> $m->{target_full_path} [$src_proto/$tgt_proto]");
+
+      rmtree($repo_dir) if -d $repo_dir;
+      my $clone_cmd = $src_ssh_cmd ? "$src_ssh_cmd git clone --mirror '$src_url' '$repo_dir' 2>&1" : "git clone --mirror '$src_url' '$repo_dir' 2>&1";
+      my $clone_out = `$clone_cmd`;
+      if ($? != 0) {
+        $log_event->('error', "clone failed for $m->{source_full_path}: $clone_out");
+        $failed++; next;
+      }
+
+      my $push_cmd = $tgt_ssh_cmd ? "cd '$repo_dir' && $tgt_ssh_cmd git push --mirror '$tgt_url' 2>&1" : "cd '$repo_dir' && git push --mirror '$tgt_url' 2>&1";
+      my $push_out = `$push_cmd`;
+      if ($? != 0) {
+        $log_event->('error', "push failed for $m->{target_full_path}: $push_out");
+        $failed++;
+      } else {
+        $log_event->('info', "synced $m->{source_full_path} -> $m->{target_full_path} successfully");
+        $synced++;
+      }
+      rmtree($repo_dir) if -d $repo_dir;
+    }
+
+    my $status = $failed > 0 ? 'failed' : 'success';
+    my $msg = "synced=$synced failed=$failed total=" . scalar(@mappings);
+    $log_event->('info', "job finished: $msg");
+    $dbh->do(q{UPDATE sync_jobs SET status=?, finished_at=NOW(), message=? WHERE id=?}, undef, $status, $msg, $job_id);
+
+    # Update last_synced_at on the profile
+    $dbh->do(q{UPDATE sync_profiles SET last_synced_at = NOW() WHERE id = ?}, undef, $profile_id);
+  };
+
+  # ── Queue Worker + Scheduler — runs every 5 seconds ───────────
+  Mojo::IOLoop->recurring(5 => sub {
+    my $dbh = DBI->connect($dsn, $user, $pass, { RaiseError => 1, AutoCommit => 1, pg_enable_utf8 => 1 });
+
+    # 1. Process queued jobs (manual triggers)
+    my $job = $dbh->selectrow_hashref(
+      q{SELECT id, profile_id FROM sync_jobs WHERE status = 'queued' ORDER BY id LIMIT 1}
+    );
+    if ($job) {
+      $run_sync_job->($dbh, $job->{id}, $job->{profile_id});
+      $dbh->disconnect;
+      return;  # one job per tick, don't stack
+    }
+
+    # 2. Check for scheduled profiles that are due
+    my $due_profile = $dbh->selectrow_hashref(
+      q{SELECT id FROM sync_profiles
+        WHERE enabled = TRUE
+          AND sync_interval_minutes IS NOT NULL
+          AND sync_interval_minutes > 0
+          AND next_sync_at IS NOT NULL
+          AND next_sync_at <= NOW()
+        ORDER BY next_sync_at ASC
+        LIMIT 1}
+    );
+    if ($due_profile) {
+      my $pid = $due_profile->{id};
+
+      # Create the job
+      $dbh->do(q{INSERT INTO sync_jobs (profile_id, status, started_at, message) VALUES (?, 'running', NOW(), 'scheduled sync')}, undef, $pid);
+      my $job_id = $dbh->last_insert_id(undef, undef, 'sync_jobs', 'id');
+
+      # Bump next_sync_at BEFORE running (prevents re-trigger if sync takes longer than interval)
+      $dbh->do(q{UPDATE sync_profiles SET next_sync_at = NOW() + (sync_interval_minutes || ' minutes')::interval WHERE id = ?}, undef, $pid);
+
+      # Run the sync
+      $run_sync_job->($dbh, $job_id, $pid);
+    }
+
+    $dbh->disconnect;
+  });
 
   app->start('daemon', '-l', ($ENV{GITMSYNCD_LISTEN} || 'http://127.0.0.1:9097'));
 }
