@@ -4,6 +4,8 @@
 
 git-advanced-multisync (`gitmsyncd`) synchronizes Git repositories across multiple hosting providers — GitHub, GitLab, and Gitea — through a web interface. No CLI configuration, no config files. Everything is managed from the browser.
 
+All access requires authentication. The default login is `admin` / `admin`.
+
 ## Supported Providers
 
 | Provider | Type | API | Notes |
@@ -38,6 +40,29 @@ Each provider is registered with its URL and API token. Sync profiles define whi
 
 ---
 
+## Authentication
+
+All pages and API endpoints (except `/api/health`) require authentication. Unauthenticated web requests redirect to `/login`. Unauthenticated API requests receive `401 Unauthorized`.
+
+### Login Page
+
+Navigate to `http://localhost:9097/login`. Default credentials: `admin` / `admin`.
+
+### Roles
+
+| Role | Can view | Can modify |
+|------|----------|------------|
+| **admin** | Everything | Providers, profiles, mappings, syncs, users |
+| **readonly** | Dashboard, providers, profiles, mappings, jobs, status | Nothing — all write operations return 403 |
+
+Admins see all management controls in the UI (add/edit/delete buttons, sync triggers). Read-only users see the same data but without action buttons.
+
+### Sessions
+
+Authentication uses Mojolicious session cookies. Sessions persist across browser restarts. Log out via the navigation bar or `GET /logout`.
+
+---
+
 ## Sync Flows
 
 ### One-Way Sync (6 directions)
@@ -61,19 +86,55 @@ Flow 9: GitHub ←──→ GitLab    Two-way sync (cloud ↔ self-hosted)
 
 ### Sync Method
 
-Each sync uses `git clone --mirror` from the source followed by `git push --mirror` to the target. This preserves all branches, tags, and refs.
+Each sync uses `git clone --mirror` from the source followed by a push to the target. The push strategy depends on the conflict policy (see below). Both HTTPS (token-authenticated) and SSH (key-based) transport are supported per-provider.
 
-### Conflict Handling
+### Conflict Policy Details
 
-| Policy | Behavior | Use Case |
-|--------|----------|----------|
-| **ff-only** | Reject if target has commits not in source | Safe default — prevents data loss |
-| **force-push** | Overwrite target with source state | One-way mirrors where source is authoritative |
-| **reject** | Log conflict, do nothing | Alert-only mode for monitoring divergence |
+Conflict policies are **enforced at sync time** — not advisory. The sync engine performs divergence checks before pushing.
+
+| Policy | Behavior | Implementation |
+|--------|----------|----------------|
+| **ff-only** | Skips diverged protected branches, syncs the rest | Fetches target refs into `refs/remotes/destination/*`. For each protected branch, runs `merge-base --is-ancestor` to verify fast-forward. Diverged branches are skipped. Builds per-branch refspecs instead of `--mirror`. Tags always included. |
+| **force-push** | Overwrites target with source state | Runs `git push --mirror --force`. Source is authoritative — target history is overwritten. |
+| **reject** | Checks all branches, skips entire repo if any diverged | Fetches target refs, checks every branch with `merge-base --is-ancestor`. If any branch has diverged, the entire repo is skipped and logged as a conflict. |
+
+**Protected branches** default to `main master develop` and are configurable per-profile.
+
+### Retry Logic
+
+Clone and push operations retry up to **3 attempts** with exponential backoff:
+- Attempt 1: immediate
+- Attempt 2: 2 second delay
+- Attempt 3: 4 second delay
+
+If all 3 attempts fail, the repo mapping is marked as failed in the job log and the sync continues with the next mapping.
 
 ---
 
 ## UX Workflow
+
+### Step 0: Log In
+
+Navigate to the login page. Default credentials: `admin` / `admin`.
+
+```
+┌─────────────────────────────────────────────────────┐
+│  git-advanced-multisync                    DEC-LLC   │
+│  ─────────────────────────────────────────────────── │
+│                                                      │
+│              ┌─────────────────────┐                │
+│              │      Log In         │                │
+│              │                     │                │
+│              │  User: [admin    ]  │                │
+│              │  Pass: [●●●●●    ]  │                │
+│              │                     │                │
+│              │    [  Log In  ]     │                │
+│              └─────────────────────┘                │
+│                                                      │
+└─────────────────────────────────────────────────────┘
+```
+
+After login, you are redirected to the dashboard.
 
 ### Step 1: Add Providers
 
@@ -127,6 +188,7 @@ The profile name is the unique identifier, not the provider pair. Use as many pr
 │  Direction:        [→ Source to Target ▼]            │
 │  Conflict Policy:  [ff-only ▼]                       │
 │  Protected Branches: [main master develop         ]  │
+│  Schedule:         [Every 30 minutes ▼]              │
 │                                                      │
 │                              [Create Profile]        │
 │                                                      │
@@ -140,6 +202,8 @@ The profile name is the unique identifier, not the provider pair. Use as many pr
 │  └────────────────────┴───────────────────┴────────┘│
 └─────────────────────────────────────────────────────┘
 ```
+
+**Schedule options**: Manual only, Every 5 minutes, Every 15 minutes, Every 30 minutes, Every hour, Every 6 hours, Every 12 hours, Every 24 hours.
 
 ### Step 3: Map Repositories
 
@@ -230,6 +294,92 @@ The landing page shows at-a-glance status of everything.
 └─────────────────────────────────────────────────────┘
 ```
 
+### Step 6: System Status
+
+The status page at `/status` provides a system health overview.
+
+```
+┌─────────────────────────────────────────────────────┐
+│  SYSTEM STATUS                                       │
+│  ─────────────────────────────────────────────────── │
+│                                                      │
+│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐│
+│  │  Providers   │ │   Profiles   │ │   Mappings   ││
+│  │  3 total     │ │  3 total     │ │  8 total     ││
+│  │  3 tested OK │ │  2 scheduled │ │  8 enabled   ││
+│  └──────────────┘ └──────────────┘ └──────────────┘│
+│                                                      │
+│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐│
+│  │   Workers    │ │  Disk Usage  │ │   Database   ││
+│  │  0 running   │ │  workdir:12M │ │  size: 24 MB ││
+│  │  0 queued    │ │              │ │              ││
+│  └──────────────┘ └──────────────┘ └──────────────┘│
+│                                                      │
+│  Next Scheduled Syncs:                               │
+│  ┌─────────────────┬──────────┬─────────────────┐   │
+│  │ Profile         │ Interval │ Next Run        │   │
+│  ├─────────────────┼──────────┼─────────────────┤   │
+│  │ gitea-to-github │ 30 min   │ 14:52:00        │   │
+│  │ gitlab-to-github│ 1 hr     │ 15:15:30        │   │
+│  └─────────────────┴──────────┴─────────────────┘   │
+│                                                      │
+│  Recent Jobs:                                        │
+│  ┌─────┬─────────────────┬──────────┬───────┐       │
+│  │ #5  │ gitea-to-github │ 14:22:01 │ done  │       │
+│  │ #4  │ gitlab-to-github│ 13:15:30 │ done  │       │
+│  │ #3  │ gitea-to-github │ 12:00:00 │ fail  │       │
+│  └─────┴─────────────────┴──────────┴───────┘       │
+│                                                      │
+│  Users:                                              │
+│  ┌──────────┬─────────┬────────────────────┐        │
+│  │ Username │ Role    │ Last Login         │        │
+│  ├──────────┼─────────┼────────────────────┤        │
+│  │ admin    │ admin   │ 2026-04-08 14:00   │        │
+│  └──────────┴─────────┴────────────────────┘        │
+└─────────────────────────────────────────────────────┘
+```
+
+---
+
+## Scheduling
+
+Each sync profile can have an optional schedule interval. When set, the background worker automatically triggers syncs at the configured frequency.
+
+### How it works
+
+- **Interval options**: 5 minutes, 15 minutes, 30 minutes, 1 hour, 6 hours, 12 hours, 24 hours, or manual only (no schedule).
+- **Staggered start** — When a profile is created with a schedule, its `next_sync_at` is set to a random offset within the interval window. This prevents all profiles from firing at the same moment.
+- **Worker loop** — The background worker runs every 5 seconds. It first checks for manually queued jobs, then checks for scheduled profiles that are due. One job per tick to avoid stacking.
+- **next_sync_at advance** — The next sync time is bumped **before** the sync runs, so a slow sync cannot cause the next run to pile up.
+- **Manual triggers** — Clicking "Sync Now" or calling `POST /api/sync/start/:profile_id` queues a job that runs independently of the schedule. The schedule is not affected.
+
+### Viewing schedules
+
+- The `/status` page shows all scheduled profiles with their interval and next run time.
+- The profiles list shows `sync_interval_minutes` and `last_synced_at` for each profile.
+
+---
+
+## Sync Locking
+
+Concurrent syncs of the same profile are prevented via database-level locking.
+
+- When a sync starts, the worker sets `sync_locked = TRUE`, `sync_locked_at = NOW()`, and `sync_locked_by = 'worker-<pid>'` on the profile.
+- If another sync attempts to run while the lock is held, it is skipped with a "profile locked" message.
+- **Stale lock timeout** — Locks older than 30 minutes are considered stale and can be broken by a new sync. This prevents a crashed worker from permanently blocking a profile.
+- The lock is **always released** after sync completes, even if the sync threw an error (wrapped in eval + finally pattern).
+
+---
+
+## Duplicate Prevention
+
+Repo mappings are checked for duplicates at creation time:
+
+- **Same pair** — If `source_full_path` and `target_full_path` already exist in any profile, the mapping is rejected with a `409 Conflict` response identifying which profile owns it.
+- **Reverse direction** — If the reverse pair (target as source, source as target) exists in any profile, it is also rejected to prevent sync loops.
+
+This applies across all profiles, not just within a single profile. A repo pair can only be synced in one direction by one profile at a time.
+
 ---
 
 ## Test Matrix
@@ -263,11 +413,12 @@ The following sync scenarios should be verified before release:
 
 ## Security Notes
 
-- API tokens are stored in the PostgreSQL database. In production, use encrypted storage or a secrets manager.
-- All provider communication uses HTTPS (except local Gitea dev instance).
-- Tokens are never displayed in the UI after initial entry — only the last 4 characters are shown.
-- Sync operations use token-authenticated HTTPS clone URLs, not SSH.
-- The web UI should be protected behind authentication in production deployments.
+- **Authentication required** — All pages and API endpoints (except `/api/health`) require an active session. Unauthenticated API requests return `401`. Write operations by read-only users return `403`.
+- **Session-based auth** — Mojolicious session cookies with configurable secret (`GITMSYNCD_SECRET` env var).
+- **Default credentials** — `admin` / `admin`. Change immediately after first login.
+- **API tokens** — Stored in PostgreSQL in plain text. Encrypted storage is on the roadmap. Tokens are never displayed in the UI after entry — only the last 4 characters are shown.
+- **Transport** — All provider API calls use HTTPS. Git clone/push operations support both HTTPS (token-authenticated) and SSH (key-based) per-provider.
+- **Sync locking** — Database-level locks prevent concurrent syncs of the same profile. Stale lock timeout: 30 minutes.
 
 ---
 
