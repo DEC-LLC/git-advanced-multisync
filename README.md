@@ -159,6 +159,8 @@ curl -X POST http://localhost:9097/api/sync/run/1
 - **Windows support** — Perl runs on Windows via Strawberry Perl or WSL. Package as a portable Windows distribution with bundled dependencies.
 - **TLS/HTTPS** — Native TLS support with user-provided certificates. Serve the web UI over HTTPS without a reverse proxy.
 - **Forced password change** — First admin login requires password change. Admin can also force password reset for any user.
+- **System status page** — Daemon uptime, worker status, next scheduled syncs, DB health, disk usage on workdir.
+- **Split architecture for Windows** — Separate web UI process and sync engine process. Start/stop/restart controls in the UI. Required for Windows support where systemd doesn't exist.
 
 ## License
 
