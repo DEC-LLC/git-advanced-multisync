@@ -147,14 +147,52 @@ sub start {
   post '/api/mappings' => sub ($c) {
     return unless $require_admin->($c);
     my $p = $c->req->json || {};
-    $c->dbh->do(
-      q{INSERT INTO repo_mappings (source_provider, source_full_path, target_provider, target_full_path, direction, enabled, profile_id)
-        VALUES (?, ?, ?, ?, ?, COALESCE(?, TRUE), ?)},
-      undef,
-      $p->{source_provider}, $p->{source_full_path},
-      $p->{target_provider}, $p->{target_full_path},
-      $p->{direction}, $p->{enabled}, $p->{profile_id}
+
+    # Check for duplicate: same source+target repo pair already synced by ANY profile
+    my $existing = $c->dbh->selectrow_hashref(
+      q{SELECT rm.id, rm.profile_id, sp.name AS profile_name
+        FROM repo_mappings rm
+        LEFT JOIN sync_profiles sp ON rm.profile_id = sp.id
+        WHERE rm.source_full_path = ? AND rm.target_full_path = ?},
+      undef, $p->{source_full_path}, $p->{target_full_path}
     );
+    if ($existing) {
+      my $owner = $existing->{profile_name} || "unassigned (mapping #$existing->{id})";
+      return $c->render(json => {
+        error => "This repo pair is already synced by profile \"$owner\". " .
+                 "Remove it from that profile first, or use a different target path."
+      }, status => 409);
+    }
+
+    # Also check reverse direction (target→source already mapped as source→target)
+    my $reverse = $c->dbh->selectrow_hashref(
+      q{SELECT rm.id, rm.profile_id, sp.name AS profile_name
+        FROM repo_mappings rm
+        LEFT JOIN sync_profiles sp ON rm.profile_id = sp.id
+        WHERE rm.source_full_path = ? AND rm.target_full_path = ?},
+      undef, $p->{target_full_path}, $p->{source_full_path}
+    );
+    if ($reverse) {
+      my $owner = $reverse->{profile_name} || "unassigned (mapping #$reverse->{id})";
+      return $c->render(json => {
+        error => "The reverse of this repo pair is already synced by profile \"$owner\" " .
+                 "(target→source). Adding this would create a sync loop."
+      }, status => 409);
+    }
+
+    eval {
+      $c->dbh->do(
+        q{INSERT INTO repo_mappings (source_provider, source_full_path, target_provider, target_full_path, direction, enabled, profile_id)
+          VALUES (?, ?, ?, ?, ?, COALESCE(?, TRUE), ?)},
+        undef,
+        $p->{source_provider}, $p->{source_full_path},
+        $p->{target_provider}, $p->{target_full_path},
+        $p->{direction}, $p->{enabled}, $p->{profile_id}
+      );
+    };
+    if ($@) {
+      return $c->render(json => { error => "insert failed: $@" }, status => 500);
+    }
     $c->render(json => { ok => Mojo::JSON->true });
   };
 
