@@ -16,11 +16,31 @@ git-advanced-multisync replaces all of that with a web UI. Add your providers, d
 - **Job history and logs** — Every sync run is logged with per-repo event details. See what synced, what failed, and why.
 - **REST API** — Everything the UI does is available via JSON API for automation and integration.
 
-## Screenshot
+## Screenshots
 
-![Dashboard](docs/screenshots/dashboard.png)
+### Dashboard
+![Dashboard](docs/screenshots/dashboard-overview.png)
+*At-a-glance view: 3 providers connected, 3 sync profiles, recent job history.*
 
-*Dashboard showing providers, profiles, and recent sync jobs.*
+### Providers
+![Providers](docs/screenshots/providers-all-connected.png)
+*Three providers configured and tested: Gitea (local), GitHub, GitLab. Green status = connected.*
+
+### Sync Profiles with Repo Discovery
+![Profiles](docs/screenshots/profiles-with-repo-discovery.png)
+*Click a profile to manage its repos. Auto-discover finds repos from the source provider.*
+
+### Create Profile
+![Create Profile](docs/screenshots/profile-create-form.png)
+*Profile form with source/target providers, direction, conflict policy, and help text.*
+
+### Repo Mappings (Audit View)
+![Mappings](docs/screenshots/repo-mappings-audit.png)
+*Read-only view of all repo mappings across profiles. Source and target paths shown.*
+
+### Sync Jobs
+![Jobs](docs/screenshots/sync-jobs-history.png)
+*Job history with status badges. Click a job to view its event log.*
 
 ## Quick Start
 
