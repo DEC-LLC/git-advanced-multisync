@@ -1,0 +1,41 @@
+# Test harness for git-advanced-multisync integration tests
+# Usage: cd t/harness && podman-compose up -d
+# Then: GITMSYNCD_TEST_DSN=... GITMSYNCD_TEST_GITEA_URL=... prove -Ilib t/
+services:
+  test-db:
+    image: docker.io/library/postgres:16-alpine
+    environment:
+      POSTGRES_DB: gitmsyncd_test
+      POSTGRES_USER: gitmsyncd_test
+      POSTGRES_PASSWORD: testpass
+    ports:
+      - "25432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gitmsyncd_test"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  test-gitea:
+    image: docker.io/gitea/gitea:latest
+    environment:
+      GITEA__database__DB_TYPE: sqlite3
+      GITEA__server__ROOT_URL: http://localhost:13000
+      GITEA__server__HTTP_PORT: "3000"
+      GITEA__security__INSTALL_LOCK: "true"
+      GITEA__service__DISABLE_REGISTRATION: "false"
+      GITEA__api__ENABLE_SWAGGER: "false"
+      USER_UID: "1000"
+      USER_GID: "1000"
+    ports:
+      - "13000:3000"
+    volumes:
+      - gitea-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:3000/api/v1/version"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  gitea-data:

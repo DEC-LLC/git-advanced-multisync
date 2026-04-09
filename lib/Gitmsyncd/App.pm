@@ -806,7 +806,9 @@ sub start {
 
   # ── Auto-start workers on boot ───────────────────────────────
   # Spawn a worker for each enabled set (and a default worker if no sets exist)
+  # Disabled via GITMSYNCD_NO_AUTOSTART=1 (used by test harness)
   Mojo::IOLoop->next_tick(sub {
+    return if $ENV{GITMSYNCD_NO_AUTOSTART};
     my $boot_dbh = DBI->connect($dsn, $user, $pass, { RaiseError => 1, AutoCommit => 1, pg_enable_utf8 => 1 });
 
     # Mark any stale workers from previous run as dead

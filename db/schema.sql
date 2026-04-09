@@ -18,19 +18,21 @@ CREATE TABLE IF NOT EXISTS owner_mappings (
 
 CREATE TABLE IF NOT EXISTS repo_mappings (
   id BIGSERIAL PRIMARY KEY,
-  source_provider VARCHAR(32) NOT NULL CHECK (source_provider IN ('github','gitlab')),
+  source_provider VARCHAR(32) NOT NULL CHECK (source_provider IN ('github','gitlab','gitea')),
   source_full_path TEXT NOT NULL,
-  target_provider VARCHAR(32) NOT NULL CHECK (target_provider IN ('github','gitlab')),
+  target_provider VARCHAR(32) NOT NULL CHECK (target_provider IN ('github','gitlab','gitea')),
   target_full_path TEXT NOT NULL,
   direction VARCHAR(32) NOT NULL CHECK (direction IN ('github_to_gitlab','gitlab_to_github','bidirectional')),
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
   branch_filter TEXT DEFAULT NULL,
+  profile_id BIGINT DEFAULT NULL,  -- FK added after sync_profiles table created
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE(source_provider, source_full_path, target_provider, target_full_path, direction)
 );
 
--- Migration for existing installs: add branch_filter column
+-- Migrations for existing installs
 ALTER TABLE repo_mappings ADD COLUMN IF NOT EXISTS branch_filter TEXT DEFAULT NULL;
+ALTER TABLE repo_mappings ADD COLUMN IF NOT EXISTS profile_id BIGINT;
 
 CREATE TABLE IF NOT EXISTS providers (
   id BIGSERIAL PRIMARY KEY,
@@ -38,11 +40,19 @@ CREATE TABLE IF NOT EXISTS providers (
   provider_type VARCHAR(32) NOT NULL CHECK (provider_type IN ('github','gitlab','gitea')),
   base_url TEXT,  -- NULL for github.com (uses api.github.com)
   api_token TEXT NOT NULL,
+  clone_protocol VARCHAR(8) NOT NULL DEFAULT 'https' CHECK (clone_protocol IN ('https','ssh')),
+  push_protocol VARCHAR(8) NOT NULL DEFAULT 'https' CHECK (push_protocol IN ('https','ssh')),
+  ssh_key_path TEXT DEFAULT NULL,
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_tested_at TIMESTAMPTZ,
   test_status VARCHAR(32) DEFAULT 'untested'
 );
+
+-- Migrations for existing installs: provider SSH columns
+ALTER TABLE providers ADD COLUMN IF NOT EXISTS clone_protocol VARCHAR(8) DEFAULT 'https';
+ALTER TABLE providers ADD COLUMN IF NOT EXISTS push_protocol VARCHAR(8) DEFAULT 'https';
+ALTER TABLE providers ADD COLUMN IF NOT EXISTS ssh_key_path TEXT DEFAULT NULL;
 
 CREATE TABLE IF NOT EXISTS sync_profiles (
   id BIGSERIAL PRIMARY KEY,
@@ -56,10 +66,18 @@ CREATE TABLE IF NOT EXISTS sync_profiles (
   conflict_policy VARCHAR(32) NOT NULL DEFAULT 'ff-only',
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  sync_interval_minutes INT DEFAULT NULL,
+  next_sync_at TIMESTAMPTZ DEFAULT NULL,
+  last_synced_at TIMESTAMPTZ DEFAULT NULL,
   sync_locked BOOLEAN DEFAULT FALSE,
   sync_locked_at TIMESTAMPTZ DEFAULT NULL,
   sync_locked_by VARCHAR(64) DEFAULT NULL
 );
+
+-- Migration for existing installs: add scheduler columns
+ALTER TABLE sync_profiles ADD COLUMN IF NOT EXISTS sync_interval_minutes INT DEFAULT NULL;
+ALTER TABLE sync_profiles ADD COLUMN IF NOT EXISTS next_sync_at TIMESTAMPTZ DEFAULT NULL;
+ALTER TABLE sync_profiles ADD COLUMN IF NOT EXISTS last_synced_at TIMESTAMPTZ DEFAULT NULL;
 
 CREATE TABLE IF NOT EXISTS sync_jobs (
   id BIGSERIAL PRIMARY KEY,
