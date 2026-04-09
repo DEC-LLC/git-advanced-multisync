@@ -24,9 +24,13 @@ CREATE TABLE IF NOT EXISTS repo_mappings (
   target_full_path TEXT NOT NULL,
   direction VARCHAR(32) NOT NULL CHECK (direction IN ('github_to_gitlab','gitlab_to_github','bidirectional')),
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  branch_filter TEXT DEFAULT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE(source_provider, source_full_path, target_provider, target_full_path, direction)
 );
+
+-- Migration for existing installs: add branch_filter column
+ALTER TABLE repo_mappings ADD COLUMN IF NOT EXISTS branch_filter TEXT DEFAULT NULL;
 
 CREATE TABLE IF NOT EXISTS providers (
   id BIGSERIAL PRIMARY KEY,
@@ -83,6 +87,36 @@ CREATE TABLE IF NOT EXISTS users (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_login_at TIMESTAMPTZ
 );
+
+-- Worker set definitions (optional — profiles can be unassigned)
+CREATE TABLE IF NOT EXISTS worker_sets (
+  id BIGSERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  max_forks_per_worker INT NOT NULL DEFAULT 4,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Add worker set assignment to profiles
+ALTER TABLE sync_profiles ADD COLUMN IF NOT EXISTS worker_set_id BIGINT
+  REFERENCES worker_sets(id) ON DELETE SET NULL;
+
+-- Worker instance registry (self-registered by worker daemons)
+CREATE TABLE IF NOT EXISTS workers (
+  id BIGSERIAL PRIMARY KEY,
+  worker_set TEXT NOT NULL DEFAULT 'default',
+  hostname TEXT NOT NULL,
+  pid INT NOT NULL,
+  status VARCHAR(16) NOT NULL DEFAULT 'running'
+    CHECK (status IN ('running', 'stopping', 'stopped', 'dead', 'paused')),
+  paused BOOLEAN NOT NULL DEFAULT FALSE,
+  active_forks INT NOT NULL DEFAULT 0,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Migration for existing installs
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS paused BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- Default admin user (password: admin — user MUST change on first login)
 -- Hash format: sha256:<salt>:<hex_digest> using Digest::SHA

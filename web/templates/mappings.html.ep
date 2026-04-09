@@ -139,6 +139,7 @@
               <th></th>
               <th>Target</th>
               <th>Direction</th>
+              <th>Branch Filter</th>
               <th>Enabled</th>
               <th class="text-end">Actions</th>
             </tr>
@@ -166,6 +167,13 @@
                   <br><code><%= $m->{target_full_path} %></code>
                 </td>
                 <td><small><%= $dir %></small></td>
+                <td>
+                  % if ($m->{branch_filter} && $m->{branch_filter} =~ /\S/) {
+                    <code class="text-primary"><%= $m->{branch_filter} %></code>
+                  % } else {
+                    <span class="text-muted">all</span>
+                  % }
+                </td>
                 <td>
                   % if ($is_admin) {
                     % if ($m->{enabled}) {
@@ -195,7 +203,7 @@
               </tr>
               % }
             % } else {
-              <tr id="emptyRow"><td colspan="8" class="text-center text-muted py-4">No repo mappings yet. Use "Auto-Discover" or "Add Manual Mapping" to get started.</td></tr>
+              <tr id="emptyRow"><td colspan="9" class="text-center text-muted py-4">No repo mappings yet. Use "Auto-Discover" or "Add Manual Mapping" to get started.</td></tr>
             % }
           </tbody>
         </table>
@@ -269,6 +277,12 @@
           <input type="hidden" id="mappingDirection" value="">
           <input type="hidden" id="mappingSourceOwner" value="">
           <input type="hidden" id="mappingTargetOwner" value="">
+
+          <div class="mb-3">
+            <label class="form-label">Branch Filter <small class="text-muted">(optional)</small></label>
+            <input type="text" class="form-control" id="mappingBranchFilter" placeholder="e.g. main,release/*">
+            <div class="form-text text-muted">Comma-separated branch globs (e.g. <code>main,release/*</code>). Leave empty to sync all branches.</div>
+          </div>
 
           <div class="form-check mb-3">
             <input class="form-check-input" type="checkbox" id="mappingEnabled" checked>
@@ -381,6 +395,13 @@
             <li><code>my-username/dotfiles</code></li>
             <li><code>my-group/subgroup/repo</code> (GitLab nested groups)</li>
           </ul>
+          <h6>Branch Filter</h6>
+          <p>By default all branches are synced. You can restrict which branches are pushed by setting a branch filter on a mapping.</p>
+          <ul>
+            <li>Comma-separated glob patterns: <code>main,release/*,hotfix-*</code></li>
+            <li><code>*</code> matches any characters (e.g. <code>release/*</code> matches <code>release/v1.0</code>)</li>
+            <li>Leave empty to sync all branches (default)</li>
+          </ul>
           <h6>Sync Directions</h6>
           <ul>
             <li><strong>Source &rarr; Target:</strong> One-way push from source to target.</li>
@@ -444,6 +465,7 @@
     function openAddMapping() {
       document.getElementById('mappingRepoName').value = '';
       document.getElementById('mappingTargetRepoName').value = '';
+      document.getElementById('mappingBranchFilter').value = '';
       document.getElementById('mappingEnabled').checked = true;
       document.getElementById('mappingModalAlert').innerHTML = '';
       document.getElementById('profileInfo').classList.add('d-none');
@@ -470,6 +492,8 @@
       var sourceOwner = document.getElementById('mappingSourceOwner').value;
       var targetOwner = document.getElementById('mappingTargetOwner').value;
 
+      var branchFilter = document.getElementById('mappingBranchFilter').value.trim() || null;
+
       var data = {
         source_provider: document.getElementById('mappingSourceProvider').value,
         source_full_path: sourceOwner + '/' + repoName,
@@ -477,7 +501,8 @@
         target_full_path: targetOwner + '/' + targetRepoName,
         direction: document.getElementById('mappingDirection').value,
         enabled: document.getElementById('mappingEnabled').checked,
-        profile_id: parseInt(profileId)
+        profile_id: parseInt(profileId),
+        branch_filter: branchFilter
       };
 
       fetch('/api/mappings', {

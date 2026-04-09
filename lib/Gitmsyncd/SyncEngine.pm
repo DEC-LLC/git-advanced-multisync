@@ -1,0 +1,305 @@
+package Gitmsyncd::SyncEngine;
+use strict;
+use warnings;
+use File::Path qw(make_path rmtree);
+use File::Spec;
+use POSIX qw(strftime);
+use Exporter 'import';
+our @EXPORT_OK = qw(run_sync_job branch_matches_filter);
+
+# ── Branch filter matching (glob-style) ─────────────────────────────
+sub branch_matches_filter {
+    my ($branch, $filter) = @_;
+    return 1 unless defined $filter && $filter =~ /\S/;  # NULL/empty = match all
+    for my $pattern (split(/\s*,\s*/, $filter)) {
+      next unless $pattern =~ /\S/;
+      # Convert glob to regex: * matches anything except /
+      (my $re = $pattern) =~ s/\*/.*/g;
+      return 1 if $branch =~ /^$re$/;
+    }
+    return 0;
+}
+
+# ── Sync engine (shared by queue worker and direct run) ─────────
+sub run_sync_job {
+    my (%args) = @_;
+    my $dbh        = $args{dbh};
+    my $job_id     = $args{job_id};
+    my $profile_id = $args{profile_id};
+    my $workdir    = $args{workdir} || $ENV{GITMSYNCD_WORKDIR} || '/tmp/gitmsyncd-workdir';
+
+    $dbh->do(q{UPDATE sync_jobs SET status='running', message='picked up by worker' WHERE id=?}, undef, $job_id);
+
+    my $log_event = sub {
+      my ($level, $msg) = @_;
+      eval { $dbh->do(q{INSERT INTO sync_job_events (job_id, level, message) VALUES (?, ?, ?)}, undef, $job_id, $level, $msg); };
+    };
+
+    # Acquire lock — atomic UPDATE with stale lock breaker (30 min timeout)
+    my $lock_acquired = $dbh->selectrow_hashref(
+      q{UPDATE sync_profiles SET sync_locked = TRUE, sync_locked_at = NOW(), sync_locked_by = 'worker-' || pg_backend_pid()
+        WHERE id = ? AND (sync_locked = FALSE OR sync_locked_at < NOW() - INTERVAL '30 minutes')
+        RETURNING id}, undef, $profile_id
+    );
+    unless ($lock_acquired) {
+      $log_event->('warn', "profile $profile_id is locked by another sync — skipping");
+      $dbh->do(q{UPDATE sync_jobs SET status='stopped', finished_at=NOW(), message='skipped: profile locked by another sync' WHERE id=?}, undef, $job_id);
+      return;
+    }
+
+    # Release lock helper — runs even on error
+    my $release_lock = sub {
+      eval { $dbh->do(q{UPDATE sync_profiles SET sync_locked = FALSE, sync_locked_at = NULL, sync_locked_by = NULL WHERE id = ?}, undef, $profile_id); };
+    };
+
+    # Wrap entire sync in eval so lock is always released
+    eval {
+      # Load profile with providers (including SSH settings)
+      my $profile = $dbh->selectrow_hashref(
+        q{SELECT sp.*,
+                 src.provider_type AS src_type, src.base_url AS src_base_url, src.api_token AS src_token,
+                 src.clone_protocol AS src_clone_proto, src.ssh_key_path AS src_ssh_key,
+                 tgt.provider_type AS tgt_type, tgt.base_url AS tgt_base_url, tgt.api_token AS tgt_token,
+                 tgt.push_protocol AS tgt_push_proto, tgt.ssh_key_path AS tgt_ssh_key
+          FROM sync_profiles sp
+          JOIN providers src ON sp.source_provider_id = src.id
+          JOIN providers tgt ON sp.target_provider_id = tgt.id
+          WHERE sp.id = ?}, undef, $profile_id
+      );
+
+      unless ($profile) {
+        $log_event->('error', 'profile not found or providers missing');
+        $dbh->do(q{UPDATE sync_jobs SET status='failed', finished_at=NOW(), message='profile not found' WHERE id=?}, undef, $job_id);
+        return;
+      }
+
+      my @mappings = @{ $dbh->selectall_arrayref(
+        q{SELECT * FROM repo_mappings WHERE profile_id = ? AND enabled = TRUE}, { Slice => {} }, $profile_id
+      ) || [] };
+
+      unless (@mappings) {
+        $log_event->('warn', 'no active repo mappings found for this profile');
+        $dbh->do(q{UPDATE sync_jobs SET status='success', finished_at=NOW(), message='no mappings to sync' WHERE id=?}, undef, $job_id);
+        return;
+      }
+
+      $log_event->('info', "found " . scalar(@mappings) . " repo mapping(s) to sync");
+
+      # Build clone/push URL — supports both HTTPS (token) and SSH (key)
+      my $build_url = sub {
+        my ($type, $base_url, $token, $full_path, $protocol) = @_;
+        $protocol ||= 'https';
+
+        if ($protocol eq 'ssh') {
+          # SSH URLs
+          if ($type eq 'github') {
+            return "git\@github.com:$full_path.git";
+          } elsif ($type eq 'gitlab') {
+            my $base = $base_url || 'https://gitlab.com';
+            my ($host) = $base =~ m{https?://([^/:]+)};
+            $host ||= 'gitlab.com';
+            return "git\@$host:$full_path.git";
+          } elsif ($type eq 'gitea') {
+            my $base = $base_url || 'https://gitea.com';
+            my ($host) = $base =~ m{https?://([^/:]+)};
+            my ($port) = $base =~ m{:(\d+)};
+            $host ||= 'gitea.com';
+            if ($port && $port ne '22') {
+              return "ssh://git\@$host:$port/$full_path.git";
+            }
+            return "git\@$host:$full_path.git";
+          }
+        }
+
+        # HTTPS URLs
+        if ($type eq 'github') {
+          return "https://$token\@github.com/$full_path.git";
+        } elsif ($type eq 'gitlab') {
+          my $base = $base_url || 'https://gitlab.com';
+          $base =~ s{/+$}{};
+          if ($base =~ m{^(https?)://(.+)}) { return "$1://oauth2:$token\@$2/$full_path.git"; }
+          return "https://oauth2:$token\@$base/$full_path.git";
+        } elsif ($type eq 'gitea') {
+          my $base = $base_url || 'https://gitea.com';
+          $base =~ s{/+$}{};
+          if ($base =~ m{^(https?)://(.+)}) { return "$1://$token\@$2/$full_path.git"; }
+          return "https://$token\@$base/$full_path.git";
+        }
+        return undef;
+      };
+
+      make_path($workdir) unless -d $workdir;
+      my ($synced, $failed) = (0, 0);
+
+      # Set up SSH command if source uses SSH
+      my $src_proto = $profile->{src_clone_proto} || 'https';
+      my $tgt_proto = $profile->{tgt_push_proto} || 'https';
+      my $src_ssh_cmd = '';
+      my $tgt_ssh_cmd = '';
+
+      if ($src_proto eq 'ssh' && $profile->{src_ssh_key}) {
+        $src_ssh_cmd = "GIT_SSH_COMMAND='ssh -i $profile->{src_ssh_key} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no'";
+      }
+      if ($tgt_proto eq 'ssh' && $profile->{tgt_ssh_key}) {
+        $tgt_ssh_cmd = "GIT_SSH_COMMAND='ssh -i $profile->{tgt_ssh_key} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no'";
+      }
+
+      # Retry helper (exponential backoff)
+      my $retry = sub {
+        my ($attempts, $cmd) = @_;
+        for my $n (1..$attempts) {
+          my $out = `$cmd`;
+          return (0, $out) if $? == 0;
+          if ($n < $attempts) {
+            my $delay = 2 * $n;
+            $log_event->('warn', "attempt $n failed, retrying in ${delay}s...");
+            sleep $delay;
+          } else {
+            return ($?, $out);
+          }
+        }
+      };
+
+      # Protected branches + conflict policy
+      my @protected = split(/\s+/, $profile->{protected_branches} || 'main master develop');
+      my %is_protected = map { $_ => 1 } @protected;
+      my $conflict_policy = $profile->{conflict_policy} || 'ff-only';
+
+      for my $m (@mappings) {
+        my $src_url = $build_url->($profile->{src_type}, $profile->{src_base_url}, $profile->{src_token}, $m->{source_full_path}, $src_proto);
+        my $tgt_url = $build_url->($profile->{tgt_type}, $profile->{tgt_base_url}, $profile->{tgt_token}, $m->{target_full_path}, $tgt_proto);
+
+        unless ($src_url && $tgt_url) {
+          $log_event->('error', "cannot build URLs for $m->{source_full_path}");
+          $failed++; next;
+        }
+
+        (my $dir_name = $m->{source_full_path}) =~ s{/}{--}g;
+        my $repo_dir = File::Spec->catdir($workdir, "$dir_name.git");
+
+        $log_event->('info', "syncing $m->{source_full_path} -> $m->{target_full_path} [$src_proto/$tgt_proto] policy=$conflict_policy");
+
+        # Clone with retry
+        rmtree($repo_dir) if -d $repo_dir;
+        my $clone_cmd = $src_ssh_cmd ? "$src_ssh_cmd git clone --mirror '$src_url' '$repo_dir' 2>&1" : "git clone --mirror '$src_url' '$repo_dir' 2>&1";
+        my ($clone_rc, $clone_out) = $retry->(3, $clone_cmd);
+        if ($clone_rc != 0) {
+          $log_event->('error', "clone failed after 3 attempts for $m->{source_full_path}: $clone_out");
+          $failed++; next;
+        }
+
+        if ($conflict_policy eq 'reject') {
+          # Fetch target, check for divergence, skip entirely if any branch diverged
+          my $fetch_tgt = $tgt_ssh_cmd
+            ? "cd '$repo_dir' && $tgt_ssh_cmd git fetch '$tgt_url' '+refs/heads/*:refs/remotes/destination/*' 2>&1"
+            : "cd '$repo_dir' && git fetch '$tgt_url' '+refs/heads/*:refs/remotes/destination/*' 2>&1";
+          `$fetch_tgt`;
+          my $has_conflict = 0;
+          my $has_filter = defined $m->{branch_filter} && $m->{branch_filter} =~ /\S/;
+          my @reject_refspecs = ('refs/tags/*:refs/tags/*');
+          for my $branch (split(/\n/, `git -C '$repo_dir' for-each-ref --format='%(refname:strip=2)' refs/heads`)) {
+            chomp $branch; next unless $branch;
+            next unless branch_matches_filter($branch, $m->{branch_filter});
+            push @reject_refspecs, "refs/heads/$branch:refs/heads/$branch";
+            my $dst = `git -C '$repo_dir' rev-parse -q --verify 'refs/remotes/destination/$branch' 2>/dev/null`;
+            chomp $dst; next unless $dst;
+            if (system("git -C '$repo_dir' merge-base --is-ancestor 'refs/remotes/destination/$branch' 'refs/heads/$branch' 2>/dev/null") != 0) {
+              $log_event->('warn', "branch '$branch' diverged — conflict (reject policy)");
+              $has_conflict = 1;
+            }
+          }
+          if ($has_conflict) {
+            $log_event->('warn', "skipping $m->{source_full_path} — divergence detected (reject)");
+            $failed++; rmtree($repo_dir) if -d $repo_dir; next;
+          }
+          # No conflicts — push (use refspecs when filtered, mirror when not)
+          my $push_cmd;
+          if ($has_filter) {
+            my $refspec_str = join(' ', map { "'$_'" } @reject_refspecs);
+            $push_cmd = $tgt_ssh_cmd
+              ? "cd '$repo_dir' && $tgt_ssh_cmd git push '$tgt_url' $refspec_str 2>&1"
+              : "cd '$repo_dir' && git push '$tgt_url' $refspec_str 2>&1";
+          } else {
+            $push_cmd = $tgt_ssh_cmd ? "cd '$repo_dir' && $tgt_ssh_cmd git push --mirror '$tgt_url' 2>&1" : "cd '$repo_dir' && git push --mirror '$tgt_url' 2>&1";
+          }
+          my ($push_rc, $push_out) = $retry->(3, $push_cmd);
+          if ($push_rc != 0) { $log_event->('error', "push failed: $push_out"); $failed++; }
+          else { $log_event->('info', "synced $m->{source_full_path} -> $m->{target_full_path} (reject policy, clean)"); $synced++; }
+
+        } elsif ($conflict_policy eq 'force-push') {
+          # Force push — source is authoritative
+          my $push_cmd;
+          if (defined $m->{branch_filter} && $m->{branch_filter} =~ /\S/) {
+            # Branch filter active: enumerate, filter, force-push matching branches
+            my @fp_refspecs = ('refs/tags/*:refs/tags/*');
+            for my $branch (split(/\n/, `git -C '$repo_dir' for-each-ref --format='%(refname:strip=2)' refs/heads`)) {
+              chomp $branch; next unless $branch;
+              next unless branch_matches_filter($branch, $m->{branch_filter});
+              push @fp_refspecs, "+refs/heads/$branch:refs/heads/$branch";
+            }
+            my $refspec_str = join(' ', map { "'$_'" } @fp_refspecs);
+            $push_cmd = $tgt_ssh_cmd
+              ? "cd '$repo_dir' && $tgt_ssh_cmd git push --force '$tgt_url' $refspec_str 2>&1"
+              : "cd '$repo_dir' && git push --force '$tgt_url' $refspec_str 2>&1";
+          } else {
+            # No filter — mirror force push (original behavior)
+            $push_cmd = $tgt_ssh_cmd ? "cd '$repo_dir' && $tgt_ssh_cmd git push --mirror --force '$tgt_url' 2>&1" : "cd '$repo_dir' && git push --mirror --force '$tgt_url' 2>&1";
+          }
+          my ($push_rc, $push_out) = $retry->(3, $push_cmd);
+          if ($push_rc != 0) { $log_event->('error', "push failed: $push_out"); $failed++; }
+          else { $log_event->('info', "synced $m->{source_full_path} -> $m->{target_full_path} (force-push)"); $synced++; }
+
+        } else {
+          # ff-only (default): per-branch conflict check on protected branches
+          my $fetch_tgt = $tgt_ssh_cmd
+            ? "cd '$repo_dir' && $tgt_ssh_cmd git fetch '$tgt_url' '+refs/heads/*:refs/remotes/destination/*' 2>&1"
+            : "cd '$repo_dir' && git fetch '$tgt_url' '+refs/heads/*:refs/remotes/destination/*' 2>&1";
+          `$fetch_tgt`;
+          my @refspecs = ('refs/tags/*:refs/tags/*');
+          my $skipped = 0;
+          for my $branch (split(/\n/, `git -C '$repo_dir' for-each-ref --format='%(refname:strip=2)' refs/heads`)) {
+            chomp $branch; next unless $branch;
+            next unless branch_matches_filter($branch, $m->{branch_filter});
+            if ($is_protected{$branch}) {
+              my $dst = `git -C '$repo_dir' rev-parse -q --verify 'refs/remotes/destination/$branch' 2>/dev/null`;
+              chomp $dst;
+              if ($dst && system("git -C '$repo_dir' merge-base --is-ancestor 'refs/remotes/destination/$branch' 'refs/heads/$branch' 2>/dev/null") != 0) {
+                $log_event->('warn', "protected branch '$branch' diverged — skipping (ff-only)");
+                $skipped++; next;
+              }
+            }
+            push @refspecs, "refs/heads/$branch:refs/heads/$branch";
+          }
+          $log_event->('warn', "$skipped protected branch(es) skipped (non-fast-forward)") if $skipped;
+          my $refspec_str = join(' ', map { "'$_'" } @refspecs);
+          my $push_cmd = $tgt_ssh_cmd
+            ? "cd '$repo_dir' && $tgt_ssh_cmd git push --prune '$tgt_url' $refspec_str 2>&1"
+            : "cd '$repo_dir' && git push --prune '$tgt_url' $refspec_str 2>&1";
+          my ($push_rc, $push_out) = $retry->(3, $push_cmd);
+          if ($push_rc != 0) { $log_event->('error', "push failed: $push_out"); $failed++; }
+          else { $log_event->('info', "synced $m->{source_full_path} -> $m->{target_full_path} (ff-only, $skipped skipped)"); $synced++; }
+        }
+
+        rmtree($repo_dir) if -d $repo_dir;
+      }
+
+      my $status = $failed > 0 ? 'failed' : 'success';
+      my $msg = "synced=$synced failed=$failed total=" . scalar(@mappings);
+      $log_event->('info', "job finished: $msg");
+      $dbh->do(q{UPDATE sync_jobs SET status=?, finished_at=NOW(), message=? WHERE id=?}, undef, $status, $msg, $job_id);
+
+      # Update last_synced_at on the profile
+      $dbh->do(q{UPDATE sync_profiles SET last_synced_at = NOW() WHERE id = ?}, undef, $profile_id);
+    };
+    # Capture any error from the eval block
+    my $sync_err = $@;
+    if ($sync_err) {
+      $log_event->('error', "sync crashed: $sync_err");
+      eval { $dbh->do(q{UPDATE sync_jobs SET status='failed', finished_at=NOW(), message=? WHERE id=?}, undef, "internal error: $sync_err", $job_id); };
+    }
+
+    # ALWAYS release the lock, even if sync threw an error
+    $release_lock->();
+}
+
+1;

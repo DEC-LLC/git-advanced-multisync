@@ -1,0 +1,17 @@
+[Unit]
+Description=gitmsyncd instance - %i
+Wants=network-online.target postgresql.service
+After=network-online.target postgresql.service
+
+[Service]
+Type=simple
+User=gitmsyncd
+Group=gitmsyncd
+EnvironmentFile=/etc/gitmsyncd/%i.env
+ExecStart=/usr/bin/perl /opt/gitmsyncd/bin/gitmsyncd.pl
+WorkingDirectory=/opt/gitmsyncd
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -6,8 +6,10 @@ use DBI;
 use FindBin;
 use File::Path qw(make_path rmtree);
 use File::Spec;
-use POSIX qw(strftime);
+use POSIX qw(strftime setsid);
 use Digest::SHA qw(sha256_hex);
+use Sys::Hostname;
+use Gitmsyncd::SyncEngine qw(run_sync_job branch_matches_filter);
 
 sub start {
   my ($self) = @_;
@@ -138,7 +140,7 @@ sub start {
   # ── Mappings CRUD ──────────────────────────────────────────────────
   get '/api/mappings' => sub ($c) {
     my $rows = $c->dbh->selectall_arrayref(
-      q{SELECT id, source_provider, source_full_path, target_provider, target_full_path, direction, enabled, profile_id FROM repo_mappings ORDER BY id},
+      q{SELECT id, source_provider, source_full_path, target_provider, target_full_path, direction, enabled, profile_id, branch_filter FROM repo_mappings ORDER BY id},
       { Slice => {} }
     );
     $c->render(json => $rows);
@@ -182,12 +184,12 @@ sub start {
 
     eval {
       $c->dbh->do(
-        q{INSERT INTO repo_mappings (source_provider, source_full_path, target_provider, target_full_path, direction, enabled, profile_id)
-          VALUES (?, ?, ?, ?, ?, COALESCE(?, TRUE), ?)},
+        q{INSERT INTO repo_mappings (source_provider, source_full_path, target_provider, target_full_path, direction, enabled, profile_id, branch_filter)
+          VALUES (?, ?, ?, ?, ?, COALESCE(?, TRUE), ?, ?)},
         undef,
         $p->{source_provider}, $p->{source_full_path},
         $p->{target_provider}, $p->{target_full_path},
-        $p->{direction}, $p->{enabled}, $p->{profile_id}
+        $p->{direction}, $p->{enabled}, $p->{profile_id}, $p->{branch_filter}
       );
     };
     if ($@) {
@@ -202,7 +204,7 @@ sub start {
     my $p  = $c->req->json || {};
     my @sets;
     my @vals;
-    for my $k (qw(source_provider source_full_path target_provider target_full_path direction enabled profile_id)) {
+    for my $k (qw(source_provider source_full_path target_provider target_full_path direction enabled profile_id branch_filter)) {
       if (exists $p->{$k}) { push @sets, "$k = ?"; push @vals, $p->{$k}; }
     }
     return $c->render(json => { error => 'nothing to update' }, status => 400) unless @sets;
@@ -385,6 +387,7 @@ sub start {
                sp.conflict_policy, sp.enabled, sp.created_at,
                sp.sync_interval_minutes, sp.next_sync_at, sp.last_synced_at,
                sp.sync_locked, sp.sync_locked_at, sp.sync_locked_by,
+               sp.worker_set_id,
                src.name AS source_provider_name, src.provider_type AS source_provider_type,
                tgt.name AS target_provider_name, tgt.provider_type AS target_provider_type
         FROM sync_profiles sp
@@ -417,12 +420,12 @@ sub start {
         $next_sync = strftime('%Y-%m-%d %H:%M:%S', localtime(time + $stagger));
       }
       $c->dbh->do(
-        q{INSERT INTO sync_profiles (name, direction, source_owner, target_owner, source_provider_id, target_provider_id, conflict_policy, enabled, sync_interval_minutes, next_sync_at)
-          VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 'ff-only'), COALESCE(?, TRUE), ?, ?)},
+        q{INSERT INTO sync_profiles (name, direction, source_owner, target_owner, source_provider_id, target_provider_id, conflict_policy, enabled, sync_interval_minutes, next_sync_at, worker_set_id)
+          VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 'ff-only'), COALESCE(?, TRUE), ?, ?, ?)},
         undef,
         $p->{name}, $p->{direction}, $p->{source_owner}, $p->{target_owner},
         $p->{source_provider_id}, $p->{target_provider_id},
-        $p->{conflict_policy}, $p->{enabled}, $interval, $next_sync
+        $p->{conflict_policy}, $p->{enabled}, $interval, $next_sync, $p->{worker_set_id}
       );
     };
     if ($@) {
@@ -440,7 +443,7 @@ sub start {
     return $c->render(json => { error => 'profile not found' }, status => 404) unless $existing;
     my @sets;
     my @vals;
-    for my $k (qw(name direction source_owner target_owner source_provider_id target_provider_id conflict_policy enabled sync_interval_minutes)) {
+    for my $k (qw(name direction source_owner target_owner source_provider_id target_provider_id conflict_policy enabled sync_interval_minutes worker_set_id)) {
       if (exists $p->{$k}) { push @sets, "$k = ?"; push @vals, $p->{$k}; }
     }
     # If interval changed, recalculate next_sync_at
@@ -538,25 +541,11 @@ sub start {
     $c->render(json => { provider_id => $id, owner => $owner, count => scalar(@repos), repos => \@repos });
   };
 
-  # ── Sync engine ────────────────────────────────────────────────────
+  # ── Sync engine (uses shared SyncEngine module) ────────────────────
 
   post '/api/sync/run/:profile_id' => sub ($c) {
     return unless $require_admin->($c);
     my $profile_id = $c->param('profile_id');
-
-    # Load profile with provider details
-    my $profile = $c->dbh->selectrow_hashref(
-      q{SELECT sp.*, src.provider_type AS src_type, src.base_url AS src_base_url, src.api_token AS src_token,
-               tgt.provider_type AS tgt_type, tgt.base_url AS tgt_base_url, tgt.api_token AS tgt_token
-        FROM sync_profiles sp
-        LEFT JOIN providers src ON sp.source_provider_id = src.id
-        LEFT JOIN providers tgt ON sp.target_provider_id = tgt.id
-        WHERE sp.id = ?},
-      undef, $profile_id
-    );
-    return $c->render(json => { error => 'profile not found' }, status => 404) unless $profile;
-    return $c->render(json => { error => 'profile has no source_provider_id' }, status => 400) unless $profile->{source_provider_id};
-    return $c->render(json => { error => 'profile has no target_provider_id' }, status => 400) unless $profile->{target_provider_id};
 
     # Create the sync job
     $c->dbh->do(
@@ -565,136 +554,19 @@ sub start {
     );
     my $job_id = $c->dbh->last_insert_id(undef, undef, 'sync_jobs', 'id');
 
-    # Helper to log events
-    my $log_event = sub {
-      my ($level, $msg) = @_;
-      $c->dbh->do(
-        q{INSERT INTO sync_job_events (job_id, level, message) VALUES (?, ?, ?)},
-        undef, $job_id, $level, $msg
-      );
-    };
-
-    # Get repo mappings for this profile (match by source/target owner)
-    my $mappings = $c->dbh->selectall_arrayref(
-      q{SELECT id, source_full_path, target_full_path, direction, enabled
-        FROM repo_mappings
-        WHERE enabled = TRUE
-        ORDER BY id},
-      { Slice => {} }
+    # Run sync using shared engine
+    run_sync_job(
+      dbh        => $c->dbh,
+      job_id     => $job_id,
+      profile_id => $profile_id,
+      workdir    => $ENV{GITMSYNCD_WORKDIR} || '/tmp/gitmsyncd-workdir',
     );
 
-    # Filter mappings to those matching this profile's owners
-    my @active_mappings;
-    for my $m (@$mappings) {
-      my $src_owner = (split('/', $m->{source_full_path}))[0] || '';
-      my $tgt_owner = (split('/', $m->{target_full_path}))[0] || '';
-      if ($src_owner eq $profile->{source_owner} || $tgt_owner eq $profile->{target_owner}) {
-        push @active_mappings, $m;
-      }
-    }
-
-    unless (@active_mappings) {
-      $log_event->('warn', 'no active repo mappings found for this profile');
-      $c->dbh->do(q{UPDATE sync_jobs SET status='success', finished_at=NOW(), message='no mappings to sync' WHERE id=?}, undef, $job_id);
-      return $c->render(json => { job_id => $job_id, status => 'success', message => 'no mappings to sync', repos_synced => 0 });
-    }
-
-    $log_event->('info', "found " . scalar(@active_mappings) . " repo mapping(s) to sync");
-
-    # Build clone URLs based on provider type
-    my $build_url = sub {
-      my ($type, $base_url, $token, $full_path) = @_;
-      if ($type eq 'github') {
-        return "https://$token\@github.com/$full_path.git";
-      } elsif ($type eq 'gitlab') {
-        my $base = $base_url || 'https://gitlab.com';
-        $base =~ s{/+$}{};
-        if ($base =~ m{^(https?)://(.+)}) {
-          my ($scheme, $host) = ($1, $2);
-          return "$scheme://oauth2:$token\@$host/$full_path.git";
-        }
-        return "https://oauth2:$token\@$base/$full_path.git";
-      } elsif ($type eq 'gitea') {
-        my $base = $base_url || 'https://gitea.com';
-        $base =~ s{/+$}{};
-        # Preserve http/https from the base_url
-        if ($base =~ m{^(https?)://(.+)}) {
-          my ($scheme, $host) = ($1, $2);
-          return "$scheme://$token\@$host/$full_path.git";
-        }
-        return "https://$token\@$base/$full_path.git";
-      }
-      return undef;
-    };
-
-    my $workdir = '/tmp/gitmsyncd-workdir';
-    make_path($workdir) unless -d $workdir;
-
-    my $synced   = 0;
-    my $failed   = 0;
-    my $job_ok   = 1;
-
-    for my $m (@active_mappings) {
-      my $src_url = $build_url->($profile->{src_type}, $profile->{src_base_url}, $profile->{src_token}, $m->{source_full_path});
-      my $tgt_url = $build_url->($profile->{tgt_type}, $profile->{tgt_base_url}, $profile->{tgt_token}, $m->{target_full_path});
-
-      unless ($src_url && $tgt_url) {
-        $log_event->('error', "cannot build URLs for mapping $m->{id}: $m->{source_full_path} -> $m->{target_full_path}");
-        $failed++;
-        next;
-      }
-
-      # Sanitize directory name
-      (my $dir_name = $m->{source_full_path}) =~ s{/}{--}g;
-      my $repo_dir = File::Spec->catdir($workdir, "$dir_name.git");
-
-      $log_event->('info', "syncing $m->{source_full_path} -> $m->{target_full_path}");
-
-      # Clone mirror from source
-      rmtree($repo_dir) if -d $repo_dir;
-      my $clone_out = `git clone --mirror '$src_url' '$repo_dir' 2>&1`;
-      my $clone_rc  = $?;
-
-      if ($clone_rc != 0) {
-        $log_event->('error', "clone failed for $m->{source_full_path}: $clone_out");
-        $failed++;
-        $job_ok = 0;
-        next;
-      }
-
-      # Push mirror to target
-      my $push_out = `cd '$repo_dir' && git push --mirror '$tgt_url' 2>&1`;
-      my $push_rc  = $?;
-
-      if ($push_rc != 0) {
-        $log_event->('error', "push failed for $m->{target_full_path}: $push_out");
-        $failed++;
-        $job_ok = 0;
-      } else {
-        $log_event->('info', "synced $m->{source_full_path} -> $m->{target_full_path} successfully");
-        $synced++;
-      }
-
-      # Cleanup
-      rmtree($repo_dir) if -d $repo_dir;
-    }
-
-    my $final_status  = $job_ok ? 'success' : ($synced > 0 ? 'success' : 'failed');
-    my $final_message = "synced=$synced failed=$failed total=" . scalar(@active_mappings);
-
-    $c->dbh->do(
-      q{UPDATE sync_jobs SET status=?, finished_at=NOW(), message=? WHERE id=?},
-      undef, $final_status, $final_message, $job_id
+    # Return result
+    my $job = $c->dbh->selectrow_hashref(
+      q{SELECT id, status, message FROM sync_jobs WHERE id = ?}, undef, $job_id
     );
-    $log_event->('info', "job finished: $final_message");
-
-    $c->render(json => {
-      job_id       => $job_id,
-      status       => $final_status,
-      repos_synced => $synced,
-      repos_failed => $failed,
-      message      => $final_message,
-    });
+    $c->render(json => $job);
   };
 
   # ── Sync jobs listing ──────────────────────────────────────────────
@@ -781,8 +653,16 @@ sub start {
     my $next_syncs = $c->dbh->selectall_arrayref(q{SELECT sp.name, sp.sync_interval_minutes, sp.next_sync_at, sp.last_synced_at, sp.sync_locked, sp.sync_locked_by FROM sync_profiles sp WHERE sp.enabled AND sp.sync_interval_minutes > 0 ORDER BY sp.next_sync_at ASC NULLS LAST LIMIT 10}, { Slice => {} });
     my $recent_jobs = $c->dbh->selectall_arrayref(q{SELECT sj.id, sj.status, sj.started_at, sj.finished_at, sj.message, sp.name as profile_name FROM sync_jobs sj LEFT JOIN sync_profiles sp ON sj.profile_id = sp.id ORDER BY sj.id DESC LIMIT 5}, { Slice => {} });
 
+    my $workers = $c->dbh->selectall_arrayref(q{
+      SELECT *, CASE WHEN last_heartbeat_at >= NOW() - INTERVAL '30 seconds' THEN 'healthy'
+                     WHEN last_heartbeat_at >= NOW() - INTERVAL '2 minutes' THEN 'stale'
+                     ELSE 'dead' END AS health
+      FROM workers WHERE status != 'stopped' ORDER BY started_at DESC
+    }, { Slice => {} });
+
     # Workdir size
-    my $workdir_size = `du -sh /tmp/gitmsyncd-workdir 2>/dev/null | cut -f1` || '0';
+    my $status_workdir = $ENV{GITMSYNCD_WORKDIR} || '/tmp/gitmsyncd-workdir';
+    my $workdir_size = `du -sh '$status_workdir' 2>/dev/null | cut -f1` || '0';
     chomp $workdir_size;
 
     # DB size
@@ -791,304 +671,166 @@ sub start {
     $c->stash(
       providers => $providers, profiles => $profiles, jobs_stats => $jobs,
       mappings => $mappings, users => $users, next_syncs => $next_syncs,
-      recent_jobs => $recent_jobs, workdir_size => $workdir_size,
+      recent_jobs => $recent_jobs, workers => $workers,
+      workdir_size => $workdir_size,
       db_size => $db_size->{size}, start_time => $^T,
     );
     $c->render(template => 'status');
   };
 
-  # ── Sync Engine (shared by queue worker and direct run) ─────────
+  # ── Workers API ────────────────────────────────────────────────────
 
-  my $run_sync_job = sub {
-    my ($dbh, $job_id, $profile_id) = @_;
-
-    $dbh->do(q{UPDATE sync_jobs SET status='running', message='picked up by worker' WHERE id=?}, undef, $job_id);
-
-    my $log_event = sub {
-      my ($level, $msg) = @_;
-      eval { $dbh->do(q{INSERT INTO sync_job_events (job_id, level, message) VALUES (?, ?, ?)}, undef, $job_id, $level, $msg); };
-    };
-
-    # Acquire lock — atomic UPDATE with stale lock breaker (30 min timeout)
-    my $lock_acquired = $dbh->selectrow_hashref(
-      q{UPDATE sync_profiles SET sync_locked = TRUE, sync_locked_at = NOW(), sync_locked_by = 'worker-' || pg_backend_pid()
-        WHERE id = ? AND (sync_locked = FALSE OR sync_locked_at < NOW() - INTERVAL '30 minutes')
-        RETURNING id}, undef, $profile_id
+  get '/api/workers' => sub ($c) {
+    my $rows = $c->dbh->selectall_arrayref(
+      q{SELECT id, worker_set, hostname, pid, status, active_forks, started_at, last_heartbeat_at,
+               CASE WHEN last_heartbeat_at >= NOW() - INTERVAL '30 seconds' THEN 'healthy'
+                    WHEN last_heartbeat_at >= NOW() - INTERVAL '2 minutes' THEN 'stale'
+                    ELSE 'dead' END AS health
+        FROM workers ORDER BY started_at DESC},
+      { Slice => {} }
     );
-    unless ($lock_acquired) {
-      $log_event->('warn', "profile $profile_id is locked by another sync — skipping");
-      $dbh->do(q{UPDATE sync_jobs SET status='stopped', finished_at=NOW(), message='skipped: profile locked by another sync' WHERE id=?}, undef, $job_id);
-      return;
-    }
-
-    # Release lock helper — runs even on error
-    my $release_lock = sub {
-      eval { $dbh->do(q{UPDATE sync_profiles SET sync_locked = FALSE, sync_locked_at = NULL, sync_locked_by = NULL WHERE id = ?}, undef, $profile_id); };
-    };
-
-    # Wrap entire sync in eval so lock is always released
-    eval {
-      # Load profile with providers (including SSH settings)
-      my $profile = $dbh->selectrow_hashref(
-        q{SELECT sp.*,
-                 src.provider_type AS src_type, src.base_url AS src_base_url, src.api_token AS src_token,
-                 src.clone_protocol AS src_clone_proto, src.ssh_key_path AS src_ssh_key,
-                 tgt.provider_type AS tgt_type, tgt.base_url AS tgt_base_url, tgt.api_token AS tgt_token,
-                 tgt.push_protocol AS tgt_push_proto, tgt.ssh_key_path AS tgt_ssh_key
-          FROM sync_profiles sp
-          JOIN providers src ON sp.source_provider_id = src.id
-          JOIN providers tgt ON sp.target_provider_id = tgt.id
-          WHERE sp.id = ?}, undef, $profile_id
-      );
-
-      unless ($profile) {
-        $log_event->('error', 'profile not found or providers missing');
-        $dbh->do(q{UPDATE sync_jobs SET status='failed', finished_at=NOW(), message='profile not found' WHERE id=?}, undef, $job_id);
-        return;
-      }
-
-      my @mappings = @{ $dbh->selectall_arrayref(
-        q{SELECT * FROM repo_mappings WHERE profile_id = ? AND enabled = TRUE}, { Slice => {} }, $profile_id
-      ) || [] };
-
-      unless (@mappings) {
-        $log_event->('warn', 'no active repo mappings found for this profile');
-        $dbh->do(q{UPDATE sync_jobs SET status='success', finished_at=NOW(), message='no mappings to sync' WHERE id=?}, undef, $job_id);
-        return;
-      }
-
-      $log_event->('info', "found " . scalar(@mappings) . " repo mapping(s) to sync");
-
-      # Build clone/push URL — supports both HTTPS (token) and SSH (key)
-      my $build_url = sub {
-        my ($type, $base_url, $token, $full_path, $protocol) = @_;
-        $protocol ||= 'https';
-
-        if ($protocol eq 'ssh') {
-          # SSH URLs
-          if ($type eq 'github') {
-            return "git\@github.com:$full_path.git";
-          } elsif ($type eq 'gitlab') {
-            my $base = $base_url || 'https://gitlab.com';
-            my ($host) = $base =~ m{https?://([^/:]+)};
-            $host ||= 'gitlab.com';
-            return "git\@$host:$full_path.git";
-          } elsif ($type eq 'gitea') {
-            my $base = $base_url || 'https://gitea.com';
-            my ($host) = $base =~ m{https?://([^/:]+)};
-            my ($port) = $base =~ m{:(\d+)};
-            $host ||= 'gitea.com';
-            if ($port && $port ne '22') {
-              return "ssh://git\@$host:$port/$full_path.git";
-            }
-            return "git\@$host:$full_path.git";
-          }
-        }
-
-        # HTTPS URLs
-        if ($type eq 'github') {
-          return "https://$token\@github.com/$full_path.git";
-        } elsif ($type eq 'gitlab') {
-          my $base = $base_url || 'https://gitlab.com';
-          $base =~ s{/+$}{};
-          if ($base =~ m{^(https?)://(.+)}) { return "$1://oauth2:$token\@$2/$full_path.git"; }
-          return "https://oauth2:$token\@$base/$full_path.git";
-        } elsif ($type eq 'gitea') {
-          my $base = $base_url || 'https://gitea.com';
-          $base =~ s{/+$}{};
-          if ($base =~ m{^(https?)://(.+)}) { return "$1://$token\@$2/$full_path.git"; }
-          return "https://$token\@$base/$full_path.git";
-        }
-        return undef;
-      };
-
-      my $workdir = '/tmp/gitmsyncd-workdir';
-      make_path($workdir) unless -d $workdir;
-      my ($synced, $failed) = (0, 0);
-
-      # Set up SSH command if source uses SSH
-      my $src_proto = $profile->{src_clone_proto} || 'https';
-      my $tgt_proto = $profile->{tgt_push_proto} || 'https';
-      my $src_ssh_cmd = '';
-      my $tgt_ssh_cmd = '';
-
-      if ($src_proto eq 'ssh' && $profile->{src_ssh_key}) {
-        $src_ssh_cmd = "GIT_SSH_COMMAND='ssh -i $profile->{src_ssh_key} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no'";
-      }
-      if ($tgt_proto eq 'ssh' && $profile->{tgt_ssh_key}) {
-        $tgt_ssh_cmd = "GIT_SSH_COMMAND='ssh -i $profile->{tgt_ssh_key} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no'";
-      }
-
-      # Retry helper (exponential backoff)
-      my $retry = sub {
-        my ($attempts, $cmd) = @_;
-        for my $n (1..$attempts) {
-          my $out = `$cmd`;
-          return (0, $out) if $? == 0;
-          if ($n < $attempts) {
-            my $delay = 2 * $n;
-            $log_event->('warn', "attempt $n failed, retrying in ${delay}s...");
-            sleep $delay;
-          } else {
-            return ($?, $out);
-          }
-        }
-      };
-
-      # Protected branches + conflict policy
-      my @protected = split(/\s+/, $profile->{protected_branches} || 'main master develop');
-      my %is_protected = map { $_ => 1 } @protected;
-      my $conflict_policy = $profile->{conflict_policy} || 'ff-only';
-
-      for my $m (@mappings) {
-        my $src_url = $build_url->($profile->{src_type}, $profile->{src_base_url}, $profile->{src_token}, $m->{source_full_path}, $src_proto);
-        my $tgt_url = $build_url->($profile->{tgt_type}, $profile->{tgt_base_url}, $profile->{tgt_token}, $m->{target_full_path}, $tgt_proto);
-
-        unless ($src_url && $tgt_url) {
-          $log_event->('error', "cannot build URLs for $m->{source_full_path}");
-          $failed++; next;
-        }
-
-        (my $dir_name = $m->{source_full_path}) =~ s{/}{--}g;
-        my $repo_dir = File::Spec->catdir($workdir, "$dir_name.git");
-
-        $log_event->('info', "syncing $m->{source_full_path} -> $m->{target_full_path} [$src_proto/$tgt_proto] policy=$conflict_policy");
-
-        # Clone with retry
-        rmtree($repo_dir) if -d $repo_dir;
-        my $clone_cmd = $src_ssh_cmd ? "$src_ssh_cmd git clone --mirror '$src_url' '$repo_dir' 2>&1" : "git clone --mirror '$src_url' '$repo_dir' 2>&1";
-        my ($clone_rc, $clone_out) = $retry->(3, $clone_cmd);
-        if ($clone_rc != 0) {
-          $log_event->('error', "clone failed after 3 attempts for $m->{source_full_path}: $clone_out");
-          $failed++; next;
-        }
-
-        if ($conflict_policy eq 'reject') {
-          # Fetch target, check for divergence, skip entirely if any branch diverged
-          my $fetch_tgt = $tgt_ssh_cmd
-            ? "cd '$repo_dir' && $tgt_ssh_cmd git fetch '$tgt_url' '+refs/heads/*:refs/remotes/destination/*' 2>&1"
-            : "cd '$repo_dir' && git fetch '$tgt_url' '+refs/heads/*:refs/remotes/destination/*' 2>&1";
-          `$fetch_tgt`;
-          my $has_conflict = 0;
-          for my $branch (split(/\n/, `git -C '$repo_dir' for-each-ref --format='%(refname:strip=2)' refs/heads`)) {
-            chomp $branch; next unless $branch;
-            my $dst = `git -C '$repo_dir' rev-parse -q --verify 'refs/remotes/destination/$branch' 2>/dev/null`;
-            chomp $dst; next unless $dst;
-            if (system("git -C '$repo_dir' merge-base --is-ancestor 'refs/remotes/destination/$branch' 'refs/heads/$branch' 2>/dev/null") != 0) {
-              $log_event->('warn', "branch '$branch' diverged — conflict (reject policy)");
-              $has_conflict = 1;
-            }
-          }
-          if ($has_conflict) {
-            $log_event->('warn', "skipping $m->{source_full_path} — divergence detected (reject)");
-            $failed++; rmtree($repo_dir) if -d $repo_dir; next;
-          }
-          # No conflicts — safe mirror push
-          my $push_cmd = $tgt_ssh_cmd ? "cd '$repo_dir' && $tgt_ssh_cmd git push --mirror '$tgt_url' 2>&1" : "cd '$repo_dir' && git push --mirror '$tgt_url' 2>&1";
-          my ($push_rc, $push_out) = $retry->(3, $push_cmd);
-          if ($push_rc != 0) { $log_event->('error', "push failed: $push_out"); $failed++; }
-          else { $log_event->('info', "synced $m->{source_full_path} -> $m->{target_full_path} (reject policy, clean)"); $synced++; }
-
-        } elsif ($conflict_policy eq 'force-push') {
-          # Force mirror — source is authoritative
-          my $push_cmd = $tgt_ssh_cmd ? "cd '$repo_dir' && $tgt_ssh_cmd git push --mirror --force '$tgt_url' 2>&1" : "cd '$repo_dir' && git push --mirror --force '$tgt_url' 2>&1";
-          my ($push_rc, $push_out) = $retry->(3, $push_cmd);
-          if ($push_rc != 0) { $log_event->('error', "push failed: $push_out"); $failed++; }
-          else { $log_event->('info', "synced $m->{source_full_path} -> $m->{target_full_path} (force-push)"); $synced++; }
-
-        } else {
-          # ff-only (default): per-branch conflict check on protected branches
-          my $fetch_tgt = $tgt_ssh_cmd
-            ? "cd '$repo_dir' && $tgt_ssh_cmd git fetch '$tgt_url' '+refs/heads/*:refs/remotes/destination/*' 2>&1"
-            : "cd '$repo_dir' && git fetch '$tgt_url' '+refs/heads/*:refs/remotes/destination/*' 2>&1";
-          `$fetch_tgt`;
-          my @refspecs = ('refs/tags/*:refs/tags/*');
-          my $skipped = 0;
-          for my $branch (split(/\n/, `git -C '$repo_dir' for-each-ref --format='%(refname:strip=2)' refs/heads`)) {
-            chomp $branch; next unless $branch;
-            if ($is_protected{$branch}) {
-              my $dst = `git -C '$repo_dir' rev-parse -q --verify 'refs/remotes/destination/$branch' 2>/dev/null`;
-              chomp $dst;
-              if ($dst && system("git -C '$repo_dir' merge-base --is-ancestor 'refs/remotes/destination/$branch' 'refs/heads/$branch' 2>/dev/null") != 0) {
-                $log_event->('warn', "protected branch '$branch' diverged — skipping (ff-only)");
-                $skipped++; next;
-              }
-            }
-            push @refspecs, "refs/heads/$branch:refs/heads/$branch";
-          }
-          $log_event->('warn', "$skipped protected branch(es) skipped (non-fast-forward)") if $skipped;
-          my $refspec_str = join(' ', map { "'$_'" } @refspecs);
-          my $push_cmd = $tgt_ssh_cmd
-            ? "cd '$repo_dir' && $tgt_ssh_cmd git push --prune '$tgt_url' $refspec_str 2>&1"
-            : "cd '$repo_dir' && git push --prune '$tgt_url' $refspec_str 2>&1";
-          my ($push_rc, $push_out) = $retry->(3, $push_cmd);
-          if ($push_rc != 0) { $log_event->('error', "push failed: $push_out"); $failed++; }
-          else { $log_event->('info', "synced $m->{source_full_path} -> $m->{target_full_path} (ff-only, $skipped skipped)"); $synced++; }
-        }
-
-        rmtree($repo_dir) if -d $repo_dir;
-      }
-
-      my $status = $failed > 0 ? 'failed' : 'success';
-      my $msg = "synced=$synced failed=$failed total=" . scalar(@mappings);
-      $log_event->('info', "job finished: $msg");
-      $dbh->do(q{UPDATE sync_jobs SET status=?, finished_at=NOW(), message=? WHERE id=?}, undef, $status, $msg, $job_id);
-
-      # Update last_synced_at on the profile
-      $dbh->do(q{UPDATE sync_profiles SET last_synced_at = NOW() WHERE id = ?}, undef, $profile_id);
-    };
-    # Capture any error from the eval block
-    my $sync_err = $@;
-    if ($sync_err) {
-      $log_event->('error', "sync crashed: $sync_err");
-      eval { $dbh->do(q{UPDATE sync_jobs SET status='failed', finished_at=NOW(), message=? WHERE id=?}, undef, "internal error: $sync_err", $job_id); };
-    }
-
-    # ALWAYS release the lock, even if sync threw an error
-    $release_lock->();
+    $c->render(json => $rows);
   };
 
-  # ── Queue Worker + Scheduler — runs every 5 seconds ───────────
-  Mojo::IOLoop->recurring(5 => sub {
-    my $dbh = DBI->connect($dsn, $user, $pass, { RaiseError => 1, AutoCommit => 1, pg_enable_utf8 => 1 });
+  # ── Worker Sets CRUD ──────────────────────────────────────────────
 
-    # 1. Process queued jobs (manual triggers)
-    my $job = $dbh->selectrow_hashref(
-      q{SELECT id, profile_id FROM sync_jobs WHERE status = 'queued' ORDER BY id LIMIT 1}
+  get '/api/worker-sets' => sub ($c) {
+    my $rows = $c->dbh->selectall_arrayref(
+      q{SELECT ws.*, (SELECT count(*) FROM sync_profiles sp WHERE sp.worker_set_id = ws.id) AS profile_count
+        FROM worker_sets ws ORDER BY ws.id},
+      { Slice => {} }
     );
-    if ($job) {
-      $run_sync_job->($dbh, $job->{id}, $job->{profile_id});
-      $dbh->disconnect;
-      return;  # one job per tick, don't stack
+    $c->render(json => $rows);
+  };
+
+  post '/api/worker-sets' => sub ($c) {
+    return unless $require_admin->($c);
+    my $p = $c->req->json || {};
+    return $c->render(json => { error => 'name required' }, status => 400) unless $p->{name};
+    eval {
+      $c->dbh->do(q{INSERT INTO worker_sets (name, max_forks_per_worker, enabled)
+                     VALUES (?, COALESCE(?, 4), COALESCE(?, TRUE))},
+        undef, $p->{name}, $p->{max_forks_per_worker}, $p->{enabled});
+    };
+    return $c->render(json => { error => "insert failed: $@" }, status => 500) if $@;
+    my $row = $c->dbh->selectrow_hashref(q{SELECT * FROM worker_sets WHERE name = ?}, undef, $p->{name});
+    $c->render(json => $row, status => 201);
+  };
+
+  del '/api/worker-sets/:id' => sub ($c) {
+    return unless $require_admin->($c);
+    $c->dbh->do(q{DELETE FROM worker_sets WHERE id = ?}, undef, $c->param('id'));
+    $c->render(json => { ok => Mojo::JSON->true });
+  };
+
+  # ── Worker lifecycle: spawn helper ────────────────────────────
+  my $worker_script = "$root/bin/gitmsyncd-worker.pl";
+
+  my $spawn_worker = sub {
+    my ($set) = @_;
+    $set ||= 'default';
+
+    # Double-fork to fully detach worker from web process
+    my $pid = fork();
+    return unless defined $pid;
+    if ($pid == 0) {
+      # First child: detach session, fork again, exit
+      setsid();
+      my $grandchild = fork();
+      if ($grandchild) {
+        exit 0;  # first child exits immediately
+      }
+      # Grandchild: exec the worker (fully detached from web)
+      exec('perl', $worker_script, '--set=' . $set);
+      exit 1;  # exec failed
+    }
+    waitpid($pid, 0);  # reap first child immediately (it exits fast)
+    return 1;
+  };
+
+  # ── Worker lifecycle API ──────────────────────────────────────
+
+  # Start a new worker for a set
+  post '/api/workers/start' => sub ($c) {
+    return unless $require_admin->($c);
+    my $p = $c->req->json || {};
+    my $set = $p->{set} || 'default';
+
+    $spawn_worker->($set);
+    # Worker will self-register in the workers table within ~5 seconds
+    $c->render(json => { ok => Mojo::JSON->true, set => $set, message => "worker starting for set '$set'" });
+  };
+
+  # Stop a worker (sends SIGTERM via PID from DB)
+  post '/api/workers/:id/stop' => sub ($c) {
+    return unless $require_admin->($c);
+    my $id = $c->param('id');
+    my $w = $c->dbh->selectrow_hashref(
+      q{SELECT id, pid, hostname, status FROM workers WHERE id = ?}, undef, $id);
+    return $c->render(json => { error => 'worker not found' }, status => 404) unless $w;
+
+    my $this_host = hostname();
+    if ($w->{hostname} ne $this_host) {
+      # Remote worker — set status flag, worker will see it on next heartbeat check
+      $c->dbh->do(q{UPDATE workers SET status = 'stopped' WHERE id = ?}, undef, $id);
+      return $c->render(json => { ok => Mojo::JSON->true, method => 'flag',
+        message => "stop flag set for remote worker on $w->{hostname} (will stop on next poll)" });
     }
 
-    # 2. Check for scheduled profiles that are due (skip locked profiles)
-    my $due_profile = $dbh->selectrow_hashref(
-      q{SELECT id FROM sync_profiles
-        WHERE enabled = TRUE
-          AND sync_interval_minutes IS NOT NULL
-          AND sync_interval_minutes > 0
-          AND next_sync_at IS NOT NULL
-          AND next_sync_at <= NOW()
-          AND (sync_locked = FALSE OR sync_locked_at < NOW() - INTERVAL '30 minutes')
-        ORDER BY next_sync_at ASC
-        LIMIT 1}
-    );
-    if ($due_profile) {
-      my $pid = $due_profile->{id};
+    # Local worker — send SIGTERM directly
+    if ($w->{pid} && kill(0, $w->{pid})) {
+      kill 'TERM', $w->{pid};
+      $c->dbh->do(q{UPDATE workers SET status = 'stopping' WHERE id = ?}, undef, $id);
+      $c->render(json => { ok => Mojo::JSON->true, method => 'signal', pid => $w->{pid} });
+    } else {
+      $c->dbh->do(q{UPDATE workers SET status = 'dead' WHERE id = ?}, undef, $id);
+      $c->render(json => { ok => Mojo::JSON->true, method => 'already_dead' });
+    }
+  };
 
-      # Create the job
-      $dbh->do(q{INSERT INTO sync_jobs (profile_id, status, started_at, message) VALUES (?, 'running', NOW(), 'scheduled sync')}, undef, $pid);
-      my $job_id = $dbh->last_insert_id(undef, undef, 'sync_jobs', 'id');
+  # Pause a worker (stops picking up new work, finishes current jobs)
+  post '/api/workers/:id/pause' => sub ($c) {
+    return unless $require_admin->($c);
+    my $id = $c->param('id');
+    $c->dbh->do(q{UPDATE workers SET paused = TRUE WHERE id = ?}, undef, $id);
+    $c->render(json => { ok => Mojo::JSON->true, message => 'worker will pause on next poll cycle' });
+  };
 
-      # Bump next_sync_at BEFORE running (prevents re-trigger if sync takes longer than interval)
-      $dbh->do(q{UPDATE sync_profiles SET next_sync_at = NOW() + (sync_interval_minutes || ' minutes')::interval WHERE id = ?}, undef, $pid);
+  # Resume a paused worker
+  post '/api/workers/:id/resume' => sub ($c) {
+    return unless $require_admin->($c);
+    my $id = $c->param('id');
+    $c->dbh->do(q{UPDATE workers SET paused = FALSE, status = 'running' WHERE id = ?}, undef, $id);
+    $c->render(json => { ok => Mojo::JSON->true, message => 'worker resumed' });
+  };
 
-      # Run the sync
-      $run_sync_job->($dbh, $job_id, $pid);
+  # ── Auto-start workers on boot ───────────────────────────────
+  # Spawn a worker for each enabled set (and a default worker if no sets exist)
+  Mojo::IOLoop->next_tick(sub {
+    my $boot_dbh = DBI->connect($dsn, $user, $pass, { RaiseError => 1, AutoCommit => 1, pg_enable_utf8 => 1 });
+
+    # Mark any stale workers from previous run as dead
+    $boot_dbh->do(q{UPDATE workers SET status = 'dead'
+                     WHERE hostname = ? AND status IN ('running', 'paused')
+                       AND last_heartbeat_at < NOW() - INTERVAL '2 minutes'},
+      undef, hostname());
+
+    # Get enabled worker sets
+    my $sets = $boot_dbh->selectall_arrayref(
+      q{SELECT name FROM worker_sets WHERE enabled = TRUE}, { Slice => {} });
+
+    if (@$sets) {
+      for my $ws (@$sets) {
+        print "[boot] auto-starting worker for set '$ws->{name}'\n";
+        $spawn_worker->($ws->{name});
+      }
+    } else {
+      # No sets configured — start a default worker
+      print "[boot] no worker sets configured, starting default worker\n";
+      $spawn_worker->('default');
     }
 
-    $dbh->disconnect;
+    $boot_dbh->disconnect;
   });
 
   app->start('daemon', '-l', ($ENV{GITMSYNCD_LISTEN} || 'http://127.0.0.1:9097'));

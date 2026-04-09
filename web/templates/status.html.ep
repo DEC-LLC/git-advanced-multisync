@@ -83,7 +83,7 @@
           <div class="card-body">
             <div class="text-muted small text-uppercase">Work Directory</div>
             <div class="stat-number"><%= $workdir_size %></div>
-            <small class="text-muted">/tmp/gitmsyncd-workdir</small>
+            <small class="text-muted"><%= $ENV{GITMSYNCD_WORKDIR} || '/tmp/gitmsyncd-workdir' %></small>
           </div>
         </div>
       </div>
@@ -201,6 +201,64 @@
       </div>
     </div>
 
+    <!-- Workers -->
+    <div class="card mt-3">
+      <div class="card-header bg-white d-flex justify-content-between align-items-center">
+        <h6 class="mb-0"><i class="bi bi-cpu"></i> Workers</h6>
+        % if ($is_admin) {
+        <button class="btn btn-sm btn-outline-primary" onclick="startWorker()"><i class="bi bi-plus-circle"></i> Start Worker</button>
+        % }
+      </div>
+      <div class="card-body p-0">
+        <table class="table table-sm table-striped mb-0">
+          <thead class="table-light"><tr><th>Set</th><th>Host</th><th>PID</th><th>Health</th><th>Forks</th><th>Started</th><th>Heartbeat</th>
+          % if ($is_admin) {
+            <th>Actions</th>
+          % }
+          </tr></thead>
+          <tbody>
+            % if (@{$workers}) {
+              % for my $w (@{$workers}) {
+              <tr>
+                <td><strong><%= $w->{worker_set} %></strong></td>
+                <td><%= $w->{hostname} %></td>
+                <td><%= $w->{pid} %></td>
+                <td>
+                  % my $h = $w->{health};
+                  % my $paused = $w->{paused} || $w->{status} eq 'paused';
+                  % if ($paused) {
+                    <span class="badge bg-info">paused</span>
+                  % } else {
+                    <span class="badge bg-<%= $h eq 'healthy' ? 'success' : $h eq 'stale' ? 'warning' : 'danger' %>"><%= $h %></span>
+                  % }
+                </td>
+                <td><%= $w->{active_forks} %></td>
+                <td><small><%= $w->{started_at} %></small></td>
+                <td><small><%= $w->{last_heartbeat_at} %></small></td>
+                % if ($is_admin) {
+                <td>
+                  % if ($w->{status} eq 'running' || $w->{status} eq 'paused') {
+                    % if ($paused) {
+                      <button class="btn btn-sm btn-outline-success py-0 px-1" onclick="workerAction(<%= $w->{id} %>, 'resume')" title="Resume"><i class="bi bi-play-fill"></i></button>
+                    % } else {
+                      <button class="btn btn-sm btn-outline-warning py-0 px-1" onclick="workerAction(<%= $w->{id} %>, 'pause')" title="Pause"><i class="bi bi-pause-fill"></i></button>
+                    % }
+                    <button class="btn btn-sm btn-outline-danger py-0 px-1" onclick="workerAction(<%= $w->{id} %>, 'stop')" title="Stop"><i class="bi bi-stop-fill"></i></button>
+                  % } else {
+                    <span class="text-muted"><small><%= $w->{status} %></small></span>
+                  % }
+                </td>
+                % }
+              </tr>
+              % }
+            % } else {
+              <tr><td colspan="<%= $is_admin ? 8 : 7 %>" class="text-muted text-center py-3">No workers registered. Click "Start Worker" above or workers will auto-start on next boot.</td></tr>
+            % }
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- Recent Jobs -->
     <div class="card mt-3">
       <div class="card-header bg-white"><h6 class="mb-0"><i class="bi bi-journal-text"></i> Recent Jobs</h6></div>
@@ -226,6 +284,39 @@
       </div>
     </div>
 
+    <!-- Resource Warning — shown when multiple workers on same host -->
+    % my %host_worker_count;
+    % for my $w (@{$workers}) {
+    %   $host_worker_count{$w->{hostname}}++ if $w->{status} eq 'running';
+    % }
+    % my $this_host = `hostname` =~ s/\n//r;
+    % my $local_count = $host_worker_count{$this_host} || 0;
+    % if ($local_count > 1) {
+    <div class="alert alert-warning mt-3" role="alert">
+      <i class="bi bi-exclamation-triangle"></i>
+      <strong>Multi-instance warning:</strong> <%= $local_count %> workers running on this host (<%= $this_host %>).
+      Each worker forks child processes for repo sync. Ensure this host has adequate CPU (4+ cores),
+      memory (4+ GB), disk I/O, and network bandwidth. Hosts with limited resources should run
+      one instance locally and deploy additional instances as containers on separate hosts.
+    </div>
+    % }
+
+    <!-- Host Resources -->
+    % my $cpu_count = 0;
+    % if (open my $cpuinfo, '<', '/proc/cpuinfo') {
+    %   $cpu_count++ while <$cpuinfo> =~ /^processor/;
+    %   close $cpuinfo;
+    % }
+    % my ($load1, $load5, $load15) = split /\s+/, (`cat /proc/loadavg 2>/dev/null` || '0 0 0');
+    % my $mem_total_mb = 0; my $mem_avail_mb = 0;
+    % if (open my $memfh, '<', '/proc/meminfo') {
+    %   while (<$memfh>) {
+    %     $mem_total_mb = int($1/1024) if /^MemTotal:\s+(\d+)/;
+    %     $mem_avail_mb = int($1/1024) if /^MemAvailable:\s+(\d+)/;
+    %   }
+    %   close $memfh;
+    % }
+
     <!-- System Info -->
     <div class="card mt-3">
       <div class="card-header bg-white"><h6 class="mb-0"><i class="bi bi-info-circle"></i> System Info</h6></div>
@@ -233,7 +324,7 @@
         <div class="row">
           <div class="col-md-4">
             <small class="text-muted">Version</small><br>
-            <strong>0.2.0</strong>
+            <strong>0.3.0</strong>
           </div>
           <div class="col-md-4">
             <small class="text-muted">Perl</small><br>
@@ -258,6 +349,26 @@
             <strong>30 minutes</strong>
           </div>
         </div>
+        <div class="row mt-2">
+          <div class="col-md-3">
+            <small class="text-muted">CPU Cores</small><br>
+            <strong><%= $cpu_count %></strong>
+          </div>
+          <div class="col-md-3">
+            <small class="text-muted">Load Average (1/5/15m)</small><br>
+            <strong class="<%= $load1 >= $cpu_count * 0.8 ? 'text-danger' : '' %>"><%= "$load1 / $load5 / $load15" %></strong>
+          </div>
+          <div class="col-md-3">
+            <small class="text-muted">Memory</small><br>
+            <strong class="<%= $mem_avail_mb < 512 ? 'text-danger' : $mem_avail_mb < 1024 ? 'text-warning' : '' %>"><%= $mem_avail_mb %> MB free</strong>
+            <small class="text-muted">/ <%= $mem_total_mb %> MB</small>
+          </div>
+          <div class="col-md-3">
+            <small class="text-muted">Workdir</small><br>
+            <strong><%= $workdir_size %></strong>
+            <small class="text-muted"><%= $ENV{GITMSYNCD_WORKDIR} || '/tmp/gitmsyncd-workdir' %></small>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -268,5 +379,38 @@
   </footer>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+  <script>
+  function startWorker() {
+    const set = prompt('Worker set name (or "default" for all profiles):', 'default');
+    if (!set) return;
+    fetch('/api/workers/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ set: set })
+    }).then(r => r.json()).then(data => {
+      if (data.ok) {
+        alert('Worker starting for set "' + set + '". It will appear in the table within a few seconds.');
+        setTimeout(() => location.reload(), 3000);
+      } else {
+        alert('Error: ' + (data.error || 'unknown'));
+      }
+    }).catch(e => alert('Request failed: ' + e));
+  }
+
+  function workerAction(id, action) {
+    const labels = { stop: 'Stop', pause: 'Pause', resume: 'Resume' };
+    if (action === 'stop' && !confirm('Stop this worker? Running jobs will finish first.')) return;
+    fetch('/api/workers/' + id + '/' + action, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    }).then(r => r.json()).then(data => {
+      if (data.ok) {
+        setTimeout(() => location.reload(), 1500);
+      } else {
+        alert('Error: ' + (data.error || 'unknown'));
+      }
+    }).catch(e => alert('Request failed: ' + e));
+  }
+  </script>
 </body>
 </html>
