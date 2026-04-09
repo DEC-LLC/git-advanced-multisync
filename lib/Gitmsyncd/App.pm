@@ -137,6 +137,46 @@ sub start {
 
   # ── Authenticated routes below ─────────────────────────────────────
 
+  # ── Password change ────────────────────────────────────────────────
+  post '/api/users/change-password' => sub ($c) {
+    my $p = $c->req->json || {};
+    my $user = $c->stash('current_user');
+    for my $f (qw(current_password new_password)) {
+      return $c->render(json => { error => "missing required field: $f" }, status => 400) unless $p->{$f};
+    }
+    return $c->render(json => { error => 'new password must be at least 8 characters' }, status => 400)
+      if length($p->{new_password}) < 8;
+
+    # Verify current password
+    my $row = $c->dbh->selectrow_hashref(
+      q{SELECT password_hash FROM users WHERE id = ?}, undef, $user->{id});
+    unless ($row && $verify_password->($p->{current_password}, $row->{password_hash})) {
+      return $c->render(json => { error => 'current password is incorrect' }, status => 403);
+    }
+
+    # Set new password
+    my $new_hash = $hash_password->($p->{new_password});
+    $c->dbh->do(q{UPDATE users SET password_hash = ? WHERE id = ?}, undef, $new_hash, $user->{id});
+    $c->render(json => { ok => Mojo::JSON->true, message => 'password changed' });
+  };
+
+  # ── Admin: reset any user's password ───────────────────────────────
+  post '/api/users/:id/reset-password' => sub ($c) {
+    return unless $require_admin->($c);
+    my $id = $c->param('id');
+    my $p = $c->req->json || {};
+    return $c->render(json => { error => 'new_password required' }, status => 400) unless $p->{new_password};
+    return $c->render(json => { error => 'new password must be at least 8 characters' }, status => 400)
+      if length($p->{new_password}) < 8;
+
+    my $existing = $c->dbh->selectrow_hashref(q{SELECT id FROM users WHERE id = ?}, undef, $id);
+    return $c->render(json => { error => 'user not found' }, status => 404) unless $existing;
+
+    my $new_hash = $hash_password->($p->{new_password});
+    $c->dbh->do(q{UPDATE users SET password_hash = ? WHERE id = ?}, undef, $new_hash, $id);
+    $c->render(json => { ok => Mojo::JSON->true, message => "password reset for user $id" });
+  };
+
   # ── Mappings CRUD ──────────────────────────────────────────────────
   get '/api/mappings' => sub ($c) {
     my $rows = $c->dbh->selectall_arrayref(
@@ -268,10 +308,11 @@ sub start {
     }
     eval {
       $c->dbh->do(
-        q{INSERT INTO providers (name, provider_type, base_url, api_token, enabled)
-          VALUES (?, ?, ?, ?, COALESCE(?, TRUE))},
+        q{INSERT INTO providers (name, provider_type, base_url, api_token, clone_protocol, push_protocol, ssh_key_path, enabled)
+          VALUES (?, ?, ?, ?, COALESCE(?, 'https'), COALESCE(?, 'https'), ?, COALESCE(?, TRUE))},
         undef,
-        $p->{name}, $p->{provider_type}, $p->{base_url}, $p->{api_token}, $p->{enabled}
+        $p->{name}, $p->{provider_type}, $p->{base_url}, $p->{api_token},
+        $p->{clone_protocol}, $p->{push_protocol}, $p->{ssh_key_path}, $p->{enabled}
       );
     };
     if ($@) {
@@ -290,7 +331,7 @@ sub start {
 
     my @sets;
     my @vals;
-    for my $col (qw(name provider_type base_url api_token enabled)) {
+    for my $col (qw(name provider_type base_url api_token clone_protocol push_protocol ssh_key_path enabled)) {
       if (exists $p->{$col}) {
         push @sets, "$col = ?";
         push @vals, $p->{$col};
