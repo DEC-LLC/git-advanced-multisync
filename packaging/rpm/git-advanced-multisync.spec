@@ -38,7 +38,12 @@ All configuration happens through the browser — no config files, no CLI.
 %install
 rm -rf $RPM_BUILD_ROOT
 
-mkdir -p $RPM_BUILD_ROOT%{_gitmsyncd_dir}/{bin,lib/Gitmsyncd,web/templates,web/public,db,docs}
+mkdir -p $RPM_BUILD_ROOT%{_gitmsyncd_dir}/bin
+mkdir -p $RPM_BUILD_ROOT%{_gitmsyncd_dir}/lib/Gitmsyncd
+mkdir -p $RPM_BUILD_ROOT%{_gitmsyncd_dir}/web/templates
+mkdir -p $RPM_BUILD_ROOT%{_gitmsyncd_dir}/web/public
+mkdir -p $RPM_BUILD_ROOT%{_gitmsyncd_dir}/db
+mkdir -p $RPM_BUILD_ROOT%{_gitmsyncd_dir}/docs
 mkdir -p $RPM_BUILD_ROOT%{_unitdir}
 mkdir -p $RPM_BUILD_ROOT%{_sysconfdir}/gitmsyncd
 mkdir -p $RPM_BUILD_ROOT%{_localstatedir}/lib/gitmsyncd/workdir
