@@ -294,27 +294,39 @@ sub run_sync_job {
           $failed++; next;
         }
 
-        # ── Debug tap: per-file detail (temporary, capped, local log only) ──
-        if ($m->{debug_enabled}) {
-          # Auto-expire check
-          if ($m->{debug_expires_at} && $m->{debug_expires_at} lt strftime('%Y-%m-%d %H:%M:%S', localtime)) {
-            eval { $dbh->do(q{UPDATE repo_mappings SET debug_enabled = FALSE, debug_expires_at = NULL WHERE id = ?}, undef, $m->{id}); };
-            $log_event->('info', "debug tap expired for $m->{source_full_path}");
-          } else {
-            my $cap = $m->{debug_file_cap} || 10;
-            my @files = split(/\n/, `git -C '$repo_dir' ls-tree -r --name-only HEAD 2>/dev/null | head -$cap`);
-            my $total = `git -C '$repo_dir' ls-tree -r --name-only HEAD 2>/dev/null | wc -l`;
-            chomp $total;
-            $log_event->('info', "DEBUG TAP ($m->{source_full_path}): $total files total, showing first $cap:");
-            for my $f (@files) {
-              chomp $f;
-              next unless $f;
-              my $size = `git -C '$repo_dir' cat-file -s HEAD:"$f" 2>/dev/null` || '?';
-              chomp $size;
-              $log_event->('info', "  DEBUG FILE: $f ($size bytes)");
-            }
-            $log_event->('info', "  ... and " . ($total - $cap) . " more files") if $total > $cap;
+        # ── Debug tap helper (shared by source and target taps) ──
+        my $debug_expired = 0;
+        if (($m->{debug_source_tap} || $m->{debug_target_tap})
+            && $m->{debug_expires_at}
+            && $m->{debug_expires_at} lt strftime('%Y-%m-%d %H:%M:%S', localtime)) {
+          eval { $dbh->do(q{UPDATE repo_mappings SET debug_source_tap = FALSE, debug_target_tap = FALSE, debug_expires_at = NULL WHERE id = ?}, undef, $m->{id}); };
+          $log_event->('info', "debug taps expired for $m->{source_full_path}");
+          $debug_expired = 1;
+        }
+
+        my $run_debug_tap = sub {
+          my ($tap_name, $dir) = @_;
+          my $cap = $m->{debug_file_cap} || 10;
+          my $total = `git -C '$dir' ls-tree -r --name-only HEAD 2>/dev/null | wc -l` || 0;
+          chomp $total;
+          my @files = split(/\n/, `git -C '$dir' ls-tree -r --name-only HEAD 2>/dev/null | head -$cap`);
+          my $branch_count = `git -C '$dir' for-each-ref --format='%(refname:strip=2)' refs/heads 2>/dev/null | wc -l` || 0;
+          chomp $branch_count;
+          my $size_kb = `du -sk '$dir' 2>/dev/null | cut -f1` || '?';
+          chomp $size_kb;
+          $log_event->('info', "[$tap_name] $m->{source_full_path}: $branch_count branches, $total files, ${size_kb}KB on disk");
+          for my $f (@files) {
+            chomp $f; next unless $f;
+            my $fsize = `git -C '$dir' cat-file -s HEAD:"$f" 2>/dev/null` || '?';
+            chomp $fsize;
+            $log_event->('info', "[$tap_name]   $f ($fsize bytes)");
           }
+          $log_event->('info', "[$tap_name]   ... and " . ($total - scalar(@files)) . " more files") if $total > scalar(@files);
+        };
+
+        # ── SOURCE TAP: fires after clone — "what did we get?" ──
+        if ($m->{debug_source_tap} && !$debug_expired) {
+          $run_debug_tap->('SOURCE', $repo_dir);
         }
 
         if ($conflict_policy eq 'reject') {
@@ -407,6 +419,37 @@ sub run_sync_job {
           my ($push_rc, $push_out) = $retry->(3, $push_cmd);
           if ($push_rc != 0) { $log_event->('error', "push failed: $push_out"); $failed++; }
           else { $log_event->('info', "synced $m->{source_full_path} -> $m->{target_full_path} (ff-only, $skipped skipped)"); $synced++; }
+        }
+
+        # ── TARGET TAP: fires after push — "what landed on the target?" ──
+        if ($m->{debug_target_tap} && !$debug_expired) {
+          # Fetch back from target into a temporary remote to see what's there
+          my $fetch_verify = $tgt_ssh_cmd
+            ? "cd '$repo_dir' && $tgt_ssh_cmd git fetch '$tgt_url' '+refs/heads/*:refs/remotes/target-verify/*' 2>&1"
+            : "cd '$repo_dir' && git fetch '$tgt_url' '+refs/heads/*:refs/remotes/target-verify/*' 2>&1";
+          my $fetch_out = `$fetch_verify`;
+          my $target_branches = `git -C '$repo_dir' for-each-ref --format='%(refname:strip=3)' refs/remotes/target-verify 2>/dev/null` || '';
+          my @tbranches = grep { $_ } split(/\n/, $target_branches);
+          $log_event->('info', "[TARGET] $m->{target_full_path}: " . scalar(@tbranches) . " branches on target after push");
+          for my $tb (@tbranches) {
+            chomp $tb;
+            my $commit = `git -C '$repo_dir' rev-parse --short 'refs/remotes/target-verify/$tb' 2>/dev/null` || '?';
+            chomp $commit;
+            $log_event->('info', "[TARGET]   branch: $tb -> $commit");
+          }
+          # Also show files from target's HEAD (first N)
+          if (@tbranches) {
+            my $default_branch = $tbranches[0];  # first branch as proxy for HEAD
+            my $cap = $m->{debug_file_cap} || 10;
+            my @tfiles = split(/\n/, `git -C '$repo_dir' ls-tree -r --name-only 'refs/remotes/target-verify/$default_branch' 2>/dev/null | head -$cap`);
+            my $ttotal = `git -C '$repo_dir' ls-tree -r --name-only 'refs/remotes/target-verify/$default_branch' 2>/dev/null | wc -l` || 0;
+            chomp $ttotal;
+            $log_event->('info', "[TARGET]   $ttotal files on target (showing first $cap):");
+            for my $f (@tfiles) {
+              chomp $f; next unless $f;
+              $log_event->('info', "[TARGET]     $f");
+            }
+          }
         }
 
         rmtree($repo_dir) if -d $repo_dir;

@@ -26,9 +26,13 @@ CREATE TABLE IF NOT EXISTS repo_mappings (
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
   branch_filter TEXT DEFAULT NULL,
   profile_id BIGINT DEFAULT NULL,  -- FK added after sync_profiles table created
-  -- Debug tap: temporary per-mapping verbose logging (auto-expires)
-  -- Detail stays in sync_job_events, NEVER goes to syslog
-  debug_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  -- Debug taps: like tcpdump for git syncs. Two checkpoints:
+  --   source_tap: fires after clone — "what did we get from source?"
+  --   target_tap: fires after push  — "what landed on the target?"
+  -- Each independently toggleable. Auto-expires. Capped file count.
+  -- Detail goes to sync_job_events ONLY, never syslog.
+  debug_source_tap BOOLEAN NOT NULL DEFAULT FALSE,
+  debug_target_tap BOOLEAN NOT NULL DEFAULT FALSE,
   debug_expires_at TIMESTAMPTZ DEFAULT NULL,
   debug_file_cap INT DEFAULT 10,
   debug_enabled_by TEXT DEFAULT NULL,
@@ -39,7 +43,8 @@ CREATE TABLE IF NOT EXISTS repo_mappings (
 -- Migrations for existing installs
 ALTER TABLE repo_mappings ADD COLUMN IF NOT EXISTS branch_filter TEXT DEFAULT NULL;
 ALTER TABLE repo_mappings ADD COLUMN IF NOT EXISTS profile_id BIGINT;
-ALTER TABLE repo_mappings ADD COLUMN IF NOT EXISTS debug_enabled BOOLEAN DEFAULT FALSE;
+ALTER TABLE repo_mappings ADD COLUMN IF NOT EXISTS debug_source_tap BOOLEAN DEFAULT FALSE;
+ALTER TABLE repo_mappings ADD COLUMN IF NOT EXISTS debug_target_tap BOOLEAN DEFAULT FALSE;
 ALTER TABLE repo_mappings ADD COLUMN IF NOT EXISTS debug_expires_at TIMESTAMPTZ;
 ALTER TABLE repo_mappings ADD COLUMN IF NOT EXISTS debug_file_cap INT DEFAULT 10;
 ALTER TABLE repo_mappings ADD COLUMN IF NOT EXISTS debug_enabled_by TEXT;

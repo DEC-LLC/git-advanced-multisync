@@ -265,40 +265,50 @@ sub start {
     $c->render(json => { ok => Mojo::JSON->true });
   };
 
-  # ── Debug tap: enable/disable per-mapping verbose logging ─────────
+  # ── Debug taps: like tcpdump for git syncs ─────────────────────────
+  # Two checkpoints: source (after clone) and target (after push)
   post '/api/mappings/:id/debug' => sub ($c) {
     return unless $require_admin->($c);
     my $id = $c->param('id');
     my $p = $c->req->json || {};
     my $user = $c->stash('current_user');
-    my $enabled = $p->{enabled} ? 1 : 0;
 
     my $existing = $c->dbh->selectrow_hashref(
       q{SELECT id FROM repo_mappings WHERE id = ?}, undef, $id);
     return $c->render(json => { error => 'mapping not found' }, status => 404) unless $existing;
 
-    if ($enabled) {
-      # Default: 30 minutes, max 60, cap 10 files
-      my $minutes = $p->{duration_minutes} || 30;
-      $minutes = 60 if $minutes > 60;  # hard cap
-      my $file_cap = $p->{file_cap} || 10;
-      $file_cap = 50 if $file_cap > 50;  # hard cap
+    # taps: "source", "target", "both", or "off"
+    my $tap = $p->{tap} || 'both';
 
+    if ($tap eq 'off') {
       $c->dbh->do(
-        q{UPDATE repo_mappings SET debug_enabled = TRUE,
-          debug_expires_at = NOW() + (? || ' minutes')::interval,
-          debug_file_cap = ?, debug_enabled_by = ?
-          WHERE id = ?},
-        undef, $minutes, $file_cap, $user->{username}, $id);
-      $c->render(json => { ok => Mojo::JSON->true,
-        message => "Debug enabled for $minutes minutes (max $file_cap files per cycle)",
-        expires_in_minutes => $minutes });
-    } else {
-      $c->dbh->do(
-        q{UPDATE repo_mappings SET debug_enabled = FALSE, debug_expires_at = NULL,
-          debug_enabled_by = NULL WHERE id = ?}, undef, $id);
-      $c->render(json => { ok => Mojo::JSON->true, message => 'Debug disabled' });
+        q{UPDATE repo_mappings SET debug_source_tap = FALSE, debug_target_tap = FALSE,
+          debug_expires_at = NULL, debug_enabled_by = NULL WHERE id = ?}, undef, $id);
+      return $c->render(json => { ok => Mojo::JSON->true, message => 'Debug taps disabled' });
     }
+
+    my $minutes = $p->{duration_minutes} || 30;
+    $minutes = 60 if $minutes > 60;
+    my $file_cap = $p->{file_cap} || 10;
+    $file_cap = 50 if $file_cap > 50;
+
+    my $src_tap = ($tap eq 'source' || $tap eq 'both') ? 'TRUE' : 'FALSE';
+    my $tgt_tap = ($tap eq 'target' || $tap eq 'both') ? 'TRUE' : 'FALSE';
+
+    $c->dbh->do(
+      qq{UPDATE repo_mappings SET debug_source_tap = $src_tap, debug_target_tap = $tgt_tap,
+        debug_expires_at = NOW() + (? || ' minutes')::interval,
+        debug_file_cap = ?, debug_enabled_by = ?
+        WHERE id = ?},
+      undef, $minutes, $file_cap, $user->{username}, $id);
+
+    my @active;
+    push @active, 'source' if $src_tap eq 'TRUE';
+    push @active, 'target' if $tgt_tap eq 'TRUE';
+    $c->render(json => { ok => Mojo::JSON->true,
+      taps => \@active,
+      message => "Debug taps [" . join(', ', @active) . "] enabled for $minutes minutes (max $file_cap files)",
+      expires_in_minutes => $minutes });
   };
 
   post '/api/sync/start/:profile_id' => sub ($c) {
