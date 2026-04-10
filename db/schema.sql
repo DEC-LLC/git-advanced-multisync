@@ -181,6 +181,37 @@ CREATE TABLE IF NOT EXISTS governance_alerts (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- ── Fleet Binding Lock ──────────────────────────────────────────────
+-- When a Fleet instance binds to this core, it stores its identity here.
+-- Only ONE Fleet can bind at a time. Governance-sensitive operations
+-- (authorizing private→public, unblocking admin blocks) require the
+-- bound Fleet's ID once locked. Local admins retain block/read authority.
+-- Unbinding requires admin auth + reason (audit logged).
+CREATE TABLE IF NOT EXISTS fleet_lock (
+  id BIGSERIAL PRIMARY KEY,
+  fleet_id TEXT NOT NULL UNIQUE,                -- Fleet's UUID (generated once on Fleet install)
+  fleet_name TEXT NOT NULL,                      -- Human-readable Fleet name
+  fleet_url TEXT,                                -- Fleet's API URL (for reference)
+  bound_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  bound_by TEXT NOT NULL,                        -- Username that initiated the bind
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  unbound_at TIMESTAMPTZ,
+  unbound_by TEXT,
+  unbind_reason TEXT
+);
+
+-- Fleet binding audit — every bind/unbind recorded permanently
+CREATE TABLE IF NOT EXISTS fleet_lock_audit (
+  id BIGSERIAL PRIMARY KEY,
+  action VARCHAR(16) NOT NULL CHECK (action IN ('bind', 'unbind', 'reject')),
+  fleet_id TEXT NOT NULL,
+  fleet_name TEXT,
+  performed_by TEXT NOT NULL,
+  performed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  details TEXT,
+  ip_address TEXT
+);
+
 -- Default admin user (password: admin — user MUST change on first login)
 -- Hash format: sha256:<salt>:<hex_digest> using Digest::SHA
 INSERT INTO users (username, password_hash, role)

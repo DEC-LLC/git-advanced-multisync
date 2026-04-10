@@ -847,6 +847,28 @@ sub start {
     $c->render(json => { ok => Mojo::JSON->true, message => 'worker resumed' });
   };
 
+  # ── Fleet lock helpers (used by authorization routes below) ──────
+  my $get_fleet_lock = sub {
+    my ($c) = @_;
+    return $c->dbh->selectrow_hashref(
+      q{SELECT fleet_id, fleet_name, fleet_url FROM fleet_lock WHERE active = TRUE LIMIT 1});
+  };
+
+  my $require_fleet_id = sub {
+    my ($c) = @_;
+    my $lock = $get_fleet_lock->($c);
+    return 1 unless $lock;  # no lock = no restriction
+    my $fleet_id = $c->req->headers->header('X-Fleet-ID') || '';
+    if ($fleet_id ne $lock->{fleet_id}) {
+      $c->render(json => {
+        error => "This instance is bound to Fleet '$lock->{fleet_name}'. Governance operations require the bound Fleet's authorization.",
+        fleet_name => $lock->{fleet_name},
+      }, status => 403);
+      return 0;
+    }
+    return 1;
+  };
+
   # ── Sync Authorizations (governance ledger) ──────────────────────
 
   # List all authorizations
@@ -864,6 +886,7 @@ sub start {
   # Authorize a private-to-public sync (admin only)
   post '/api/authorizations' => sub ($c) {
     return unless $require_admin->($c);
+    return unless $require_fleet_id->($c);  # Fleet lock: must be authorized Fleet or unbound
     my $p = $c->req->json || {};
     my $user = $c->stash('current_user');
 
@@ -1029,6 +1052,103 @@ sub start {
           WHERE rm.enabled = TRUE ORDER BY rm.id}, { Slice => {} });
     $c->stash(authorizations => $authorizations, alerts => $alerts, mappings => $mappings);
     $c->render(template => 'authorizations');
+  };
+
+  # ── Fleet Binding Lock (routes — helpers declared above) ─────────
+
+  # Get lock status (any authenticated user)
+  get '/api/fleet/status' => sub ($c) {
+    my $lock = $get_fleet_lock->($c);
+    if ($lock) {
+      $c->render(json => { bound => Mojo::JSON->true, fleet_id => $lock->{fleet_id},
+        fleet_name => $lock->{fleet_name}, fleet_url => $lock->{fleet_url} });
+    } else {
+      $c->render(json => { bound => Mojo::JSON->false });
+    }
+  };
+
+  # Bind this core to a Fleet instance
+  post '/api/fleet/bind' => sub ($c) {
+    return unless $require_admin->($c);
+    my $p = $c->req->json || {};
+    my $user = $c->stash('current_user');
+
+    for my $f (qw(fleet_id fleet_name)) {
+      return $c->render(json => { error => "missing required field: $f" }, status => 400) unless $p->{$f};
+    }
+
+    # Check if already bound
+    my $existing = $get_fleet_lock->($c);
+    if ($existing) {
+      if ($existing->{fleet_id} eq $p->{fleet_id}) {
+        return $c->render(json => { ok => Mojo::JSON->true, message => 'already bound to this Fleet' });
+      }
+      # Audit the rejection
+      eval { $c->dbh->do(
+        q{INSERT INTO fleet_lock_audit (action, fleet_id, fleet_name, performed_by, details, ip_address)
+          VALUES ('reject', ?, ?, ?, ?, ?)},
+        undef, $p->{fleet_id}, $p->{fleet_name}, $user->{username},
+        "Rejected: already bound to Fleet '$existing->{fleet_name}' ($existing->{fleet_id})",
+        $c->tx->remote_address); };
+      return $c->render(json => {
+        error => "This instance is already bound to Fleet '$existing->{fleet_name}'. Unbind first.",
+        bound_to => $existing->{fleet_name},
+      }, status => 409);
+    }
+
+    eval {
+      $c->dbh->do(
+        q{INSERT INTO fleet_lock (fleet_id, fleet_name, fleet_url, bound_by)
+          VALUES (?, ?, ?, ?)},
+        undef, $p->{fleet_id}, $p->{fleet_name}, $p->{fleet_url}, $user->{username});
+      $c->dbh->do(
+        q{INSERT INTO fleet_lock_audit (action, fleet_id, fleet_name, performed_by, details, ip_address)
+          VALUES ('bind', ?, ?, ?, 'Fleet bound to this core instance', ?)},
+        undef, $p->{fleet_id}, $p->{fleet_name}, $user->{username}, $c->tx->remote_address);
+    };
+    if ($@) {
+      return $c->render(json => { error => "bind failed: $@" }, status => 500);
+    }
+    $c->render(json => { ok => Mojo::JSON->true, message => "Bound to Fleet '$p->{fleet_name}'" }, status => 201);
+  };
+
+  # Unbind from Fleet (admin only, requires reason)
+  post '/api/fleet/unbind' => sub ($c) {
+    return unless $require_admin->($c);
+    my $p = $c->req->json || {};
+    my $user = $c->stash('current_user');
+
+    return $c->render(json => { error => 'reason required' }, status => 400) unless $p->{reason};
+
+    my $lock = $get_fleet_lock->($c);
+    return $c->render(json => { error => 'not bound to any Fleet' }, status => 404) unless $lock;
+
+    $c->dbh->do(
+      q{UPDATE fleet_lock SET active = FALSE, unbound_at = NOW(), unbound_by = ?, unbind_reason = ?
+        WHERE active = TRUE},
+      undef, $user->{username}, $p->{reason});
+    $c->dbh->do(
+      q{INSERT INTO fleet_lock_audit (action, fleet_id, fleet_name, performed_by, details, ip_address)
+        VALUES ('unbind', ?, ?, ?, ?, ?)},
+      undef, $lock->{fleet_id}, $lock->{fleet_name}, $user->{username},
+      "Unbound: $p->{reason}", $c->tx->remote_address);
+
+    # Create governance alert for the unbinding
+    eval { $c->dbh->do(
+      q{INSERT INTO governance_alerts (alert_type, severity, message)
+        VALUES ('visibility_changed', 'critical', ?)},
+      undef, "Instance unbound from Fleet '$lock->{fleet_name}' by $user->{username}: $p->{reason}"
+    ); };
+
+    $c->render(json => { ok => Mojo::JSON->true, message => "Unbound from Fleet '$lock->{fleet_name}'" });
+  };
+
+  # Fleet lock audit log
+  get '/api/fleet/audit' => sub ($c) {
+    return unless $require_admin->($c);
+    my $rows = $c->dbh->selectall_arrayref(
+      q{SELECT * FROM fleet_lock_audit ORDER BY performed_at DESC LIMIT 50}, { Slice => {} });
+    $c->render(json => $rows);
   };
 
   # ── Auto-start workers on boot ───────────────────────────────
