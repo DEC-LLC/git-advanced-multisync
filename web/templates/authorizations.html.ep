@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sync Authorizations - git-advanced-multisync</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
+  <style>
+    :root { --brand-dark: #0f2b46; --brand-accent: #1a73e8; }
+    .navbar { background-color: var(--brand-dark) !important; }
+    .navbar-brand { font-weight: 700; letter-spacing: -0.5px; }
+    .navbar-brand .bi { color: #4dabf7; }
+    .badge-authorized { background: #198754; }
+    .badge-blocked { background: #dc3545; }
+    .badge-revoked { background: #ffc107; color: #000; }
+    footer { color: #6c757d; font-size: 0.85rem; }
+  </style>
+</head>
+<body class="bg-light">
+
+  <!-- Navigation -->
+  <nav class="navbar navbar-expand-lg navbar-dark">
+    <div class="container-fluid">
+      <a class="navbar-brand" href="/"><i class="bi bi-arrow-repeat"></i> git-advanced-multisync</a>
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#mainNav">
+        <span class="navbar-toggler-icon"></span>
+      </button>
+      <div class="collapse navbar-collapse" id="mainNav">
+        <ul class="navbar-nav me-auto">
+          <li class="nav-item"><a class="nav-link" href="/">Dashboard</a></li>
+          <li class="nav-item"><a class="nav-link" href="/providers">Providers</a></li>
+          <li class="nav-item"><a class="nav-link" href="/profiles">Profiles</a></li>
+          <li class="nav-item"><a class="nav-link" href="/mappings">Mappings</a></li>
+          <li class="nav-item"><a class="nav-link" href="/jobs">Jobs</a></li>
+          <li class="nav-item"><a class="nav-link" href="/status">Status</a></li>
+          <li class="nav-item"><a class="nav-link active" href="/authorizations">Authorizations</a></li>
+        </ul>
+        <ul class="navbar-nav">
+          <li class="nav-item">
+            <a class="nav-link" href="#" data-bs-toggle="modal" data-bs-target="#helpModal">
+              <i class="bi bi-question-circle"></i> Help
+            </a>
+          </li>
+        </ul>
+        <span class="navbar-text text-light me-3">
+          <i class="bi bi-person"></i> <%= $current_user->{username} %>
+          (<%= $current_user->{role} %>)
+        </span>
+        <a class="nav-link text-light" href="/logout"><i class="bi bi-box-arrow-right"></i> Logout</a>
+      </div>
+    </div>
+  </nav>
+
+  <div class="container-fluid py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+      <h2 class="mb-0"><i class="bi bi-shield-lock"></i> Sync Authorizations</h2>
+      % if ($is_admin) {
+      <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#newAuthModal">
+        <i class="bi bi-plus-circle"></i> New Authorization
+      </button>
+      % }
+    </div>
+
+    <!-- Section 1: Governance Alerts -->
+    % if (@{$alerts}) {
+    <div class="card mb-4 border-danger">
+      <div class="card-header bg-danger text-white">
+        <strong><i class="bi bi-exclamation-triangle"></i> Governance Alerts</strong>
+        &mdash; <%= scalar @{$alerts} %> unacknowledged
+      </div>
+      <div class="card-body p-0">
+        % for my $a (@{$alerts}) {
+        <div class="alert <%= $a->{severity} eq 'critical' ? 'alert-danger' : 'alert-warning' %> m-3 d-flex justify-content-between align-items-start" role="alert">
+          <div>
+            <strong><%= $a->{alert_type} %></strong>
+            <span class="badge bg-<%= $a->{severity} eq 'critical' ? 'danger' : 'warning' %>"><%= $a->{severity} %></span>
+            <br>
+            % if ($a->{source_repo}) {
+            <small class="text-muted">
+              <i class="bi bi-lock"></i> <code><%= $a->{source_repo} %></code>
+              &rarr;
+              <i class="bi bi-globe"></i> <code><%= $a->{target_repo} %></code>
+            </small><br>
+            % }
+            <small><%= $a->{message} %></small><br>
+            <small class="text-muted"><%= $a->{created_at} %></small>
+          </div>
+          % if ($is_admin) {
+          <button class="btn btn-sm btn-outline-secondary ms-2" onclick="acknowledgeAlert(<%= $a->{id} %>)">
+            <i class="bi bi-check-lg"></i> Acknowledge
+          </button>
+          % }
+        </div>
+        % }
+      </div>
+    </div>
+    % }
+
+    <!-- Section 2: Authorization Ledger -->
+    <div class="card">
+      <div class="card-header bg-white d-flex justify-content-between align-items-center">
+        <strong><i class="bi bi-journal-text"></i> Authorization Ledger</strong>
+        <small class="text-muted"><%= scalar @{$authorizations} %> record(s)</small>
+      </div>
+      <div class="card-body p-0">
+        % if (@{$authorizations}) {
+        <div class="table-responsive">
+          <table class="table table-sm table-striped mb-0">
+            <thead class="table-light">
+              <tr>
+                <th>ID</th>
+                <th>Source Repo</th>
+                <th>Target Repo</th>
+                <th>Risk Level</th>
+                <th>Status</th>
+                <th>Authorized By</th>
+                <th>Date</th>
+                <th>Acknowledgment</th>
+                % if ($is_admin) {
+                <th>Actions</th>
+                % }
+              </tr>
+            </thead>
+            <tbody>
+              % for my $a (@{$authorizations}) {
+              <tr>
+                <td><%= $a->{id} %></td>
+                <td><code><%= $a->{source_repo} %></code></td>
+                <td><code><%= $a->{target_repo} %></code></td>
+                <td>
+                  % if ($a->{risk_level} eq 'private_to_public') {
+                  <span class="badge bg-danger">private-to-public</span>
+                  % } else {
+                  <span class="badge bg-secondary">normal</span>
+                  % }
+                </td>
+                <td>
+                  % if ($a->{authorization_status} eq 'authorized') {
+                  <span class="badge badge-authorized">authorized</span>
+                  % } elsif ($a->{authorization_status} eq 'revoked') {
+                  <span class="badge badge-revoked">revoked</span>
+                  % } else {
+                  <span class="badge badge-blocked">blocked</span>
+                  % }
+                </td>
+                <td><%= $a->{authorized_by} %></td>
+                <td><small><%= $a->{authorized_at} || $a->{created_at} %></small></td>
+                <td><small><%= $a->{acknowledgment} %></small></td>
+                % if ($is_admin) {
+                <td>
+                  % if ($a->{authorization_status} eq 'authorized') {
+                  <button class="btn btn-sm btn-outline-danger py-0 px-1" onclick="revoke(<%= $a->{id} %>)" title="Revoke">
+                    <i class="bi bi-x-circle"></i> Revoke
+                  </button>
+                  % } elsif ($a->{authorization_status} eq 'blocked' && $a->{mapping_id}) {
+                  <button class="btn btn-sm btn-outline-success py-0 px-1" onclick="openAuthorizeModal(<%= $a->{mapping_id} %>, '<%= $a->{source_repo} %>', '<%= $a->{target_repo} %>')" title="Authorize">
+                    <i class="bi bi-check-circle"></i> Authorize
+                  </button>
+                  % } else {
+                  <span class="text-muted"><small>--</small></span>
+                  % }
+                </td>
+                % }
+              </tr>
+              % }
+            </tbody>
+          </table>
+        </div>
+        % } else {
+        <div class="p-4 text-center text-muted">
+          <i class="bi bi-shield-check fs-1"></i>
+          <p class="mt-2">No authorization records yet. Authorizations are created when a private-to-public sync is blocked or an admin pre-authorizes a mapping.</p>
+        </div>
+        % }
+      </div>
+    </div>
+
+  </div><!-- /container -->
+
+  <!-- New Authorization Modal -->
+  <div class="modal fade" id="newAuthModal" tabindex="-1">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header bg-warning">
+          <h5 class="modal-title"><i class="bi bi-shield-exclamation"></i> Authorize Private-to-Public Sync</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div class="alert alert-danger">
+            <i class="bi bi-exclamation-triangle-fill"></i>
+            <strong>Warning:</strong> You are authorizing sync of a PRIVATE repository to a PUBLIC target.
+            This will expose private code publicly.
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-bold">Mapping</label>
+            <select class="form-select" id="authMappingId">
+              <option value="">-- Select a repo mapping --</option>
+              % for my $m (@{$mappings}) {
+              <option value="<%= $m->{id} %>" data-source="<%= $m->{source_full_path} %>" data-target="<%= $m->{target_full_path} %>">
+                #<%= $m->{id} %>: <%= $m->{source_full_path} %> -> <%= $m->{target_full_path} %>
+                % if ($m->{profile_name}) {
+                  (<%= $m->{profile_name} %>)
+                % }
+              </option>
+              % }
+            </select>
+          </div>
+          <div id="authRepoDetails" class="mb-3" style="display:none;">
+            <div class="card bg-light">
+              <div class="card-body py-2">
+                <small class="text-muted">Source (private):</small> <code id="authSourceRepo"></code><br>
+                <small class="text-muted">Target (public):</small> <code id="authTargetRepo"></code>
+              </div>
+            </div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-bold">Authorizing as:</label>
+            <span class="badge bg-primary"><%= $current_user->{username} %></span>
+          </div>
+          <div class="mb-3">
+            <label for="authAcknowledgment" class="form-label fw-bold">Type "I ACCEPT" to confirm:</label>
+            <input type="text" class="form-control" id="authAcknowledgment" placeholder="I ACCEPT" oninput="checkAcceptInput()">
+            <div class="form-text">This confirms you understand the risk of exposing private code publicly.</div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-danger" id="btnAuthorize" onclick="submitAuthorization()" disabled>
+            <i class="bi bi-shield-check"></i> Authorize Sync
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Help Modal -->
+  <div class="modal fade" id="helpModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="bi bi-question-circle"></i> Sync Governance</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <h6>Private-to-Public Sync Prevention</h6>
+          <p>When a sync job detects that a <strong>private</strong> source repository is being synced to a
+             <strong>public</strong> target, the sync is <strong>blocked by default</strong>. An admin must
+             explicitly authorize the sync before it can proceed.</p>
+          <h6>How It Works</h6>
+          <ol>
+            <li>The sync engine checks source and target repository visibility via provider APIs before each sync</li>
+            <li>If source is private and target is public, it checks the <code>sync_authorizations</code> table</li>
+            <li>Without an active authorization, the sync is blocked and a governance alert is created</li>
+            <li>An admin can authorize the sync by typing "I ACCEPT" in the authorization form</li>
+            <li>Authorizations can be revoked at any time, which will block future syncs</li>
+          </ol>
+          <h6>Authorization Statuses</h6>
+          <ul>
+            <li><span class="badge bg-success">authorized</span> &mdash; Admin has approved this private-to-public sync</li>
+            <li><span class="badge bg-danger">blocked</span> &mdash; Sync was attempted but blocked (no authorization)</li>
+            <li><span class="badge bg-warning text-dark">revoked</span> &mdash; Authorization was revoked; future syncs will be blocked</li>
+          </ul>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer class="text-center py-3">
+    git-advanced-multisync &mdash; DEC-LLC
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+  <script>
+    // Check I ACCEPT input
+    function checkAcceptInput() {
+      const val = document.getElementById('authAcknowledgment').value.trim();
+      document.getElementById('btnAuthorize').disabled = !/I ACCEPT/i.test(val);
+    }
+
+    // Mapping dropdown change handler
+    document.getElementById('authMappingId').addEventListener('change', function() {
+      const opt = this.options[this.selectedIndex];
+      const details = document.getElementById('authRepoDetails');
+      if (this.value) {
+        document.getElementById('authSourceRepo').textContent = opt.dataset.source || '';
+        document.getElementById('authTargetRepo').textContent = opt.dataset.target || '';
+        details.style.display = 'block';
+      } else {
+        details.style.display = 'none';
+      }
+    });
+
+    // Open authorize modal pre-populated from alert/ledger row
+    function openAuthorizeModal(mappingId, sourceRepo, targetRepo) {
+      const select = document.getElementById('authMappingId');
+      select.value = mappingId;
+      select.dispatchEvent(new Event('change'));
+      document.getElementById('authAcknowledgment').value = '';
+      document.getElementById('btnAuthorize').disabled = true;
+      new bootstrap.Modal(document.getElementById('newAuthModal')).show();
+    }
+
+    // Submit authorization
+    function submitAuthorization() {
+      const mappingId = document.getElementById('authMappingId').value;
+      const acknowledgment = document.getElementById('authAcknowledgment').value.trim();
+
+      if (!mappingId) {
+        showAlert('Please select a repo mapping.', 'warning');
+        return;
+      }
+
+      const btn = document.getElementById('btnAuthorize');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Authorizing...';
+
+      fetch('/api/authorizations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mapping_id: parseInt(mappingId),
+          acknowledgment: acknowledgment
+        })
+      })
+      .then(r => r.json().then(data => ({ status: r.status, data })))
+      .then(({ status, data }) => {
+        if (status >= 200 && status < 300) {
+          showAlert(data.message || 'Authorization created.', 'success');
+          setTimeout(() => location.reload(), 1500);
+        } else {
+          showAlert(data.error || 'Authorization failed.', 'danger');
+          btn.disabled = false;
+          btn.innerHTML = '<i class="bi bi-shield-check"></i> Authorize Sync';
+        }
+      })
+      .catch(err => {
+        showAlert('Error: ' + err.message, 'danger');
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-shield-check"></i> Authorize Sync';
+      });
+    }
+
+    // Revoke authorization
+    function revoke(authId) {
+      const reason = prompt('Reason for revocation (optional):');
+      if (reason === null) return;  // user cancelled
+
+      fetch('/api/authorizations/' + authId + '/revoke', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: reason || 'Revoked by admin' })
+      })
+      .then(r => r.json().then(data => ({ status: r.status, data })))
+      .then(({ status, data }) => {
+        if (data.ok) {
+          showAlert('Authorization revoked.', 'warning');
+          setTimeout(() => location.reload(), 1500);
+        } else {
+          showAlert(data.error || 'Revocation failed.', 'danger');
+        }
+      })
+      .catch(err => showAlert('Error: ' + err.message, 'danger'));
+    }
+
+    // Acknowledge governance alert
+    function acknowledgeAlert(alertId) {
+      fetch('/api/governance/alerts/' + alertId + '/acknowledge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      })
+      .then(r => r.json())
+      .then(data => {
+        if (data.ok) {
+          showAlert('Alert acknowledged.', 'info');
+          setTimeout(() => location.reload(), 1000);
+        } else {
+          showAlert(data.error || 'Failed to acknowledge alert.', 'danger');
+        }
+      })
+      .catch(err => showAlert('Error: ' + err.message, 'danger'));
+    }
+
+    function showAlert(msg, type) {
+      const div = document.createElement('div');
+      div.className = 'alert alert-' + type + ' alert-dismissible fade show position-fixed top-0 start-50 translate-middle-x mt-5';
+      div.style.zIndex = '9999';
+      div.innerHTML = msg + '<button type="button" class="btn-close" data-bs-dismiss="alert"></button>';
+      document.body.appendChild(div);
+      setTimeout(() => div.remove(), 4000);
+    }
+  </script>
+</body>
+</html>

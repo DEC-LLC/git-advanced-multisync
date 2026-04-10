@@ -136,6 +136,51 @@ CREATE TABLE IF NOT EXISTS workers (
 -- Migration for existing installs
 ALTER TABLE workers ADD COLUMN IF NOT EXISTS paused BOOLEAN NOT NULL DEFAULT FALSE;
 
+-- ── Sync Authorizations — immutable governance ledger ────────────────
+-- Records WHO authorized WHAT sync. Private→public syncs are BLOCKED
+-- by default and require explicit admin authorization with acknowledgment.
+-- This table is append-only: no UPDATEs on core fields, only revocation.
+CREATE TABLE IF NOT EXISTS sync_authorizations (
+  id BIGSERIAL PRIMARY KEY,
+  mapping_id BIGINT REFERENCES repo_mappings(id) ON DELETE SET NULL,
+  profile_id BIGINT REFERENCES sync_profiles(id) ON DELETE SET NULL,
+  source_repo TEXT NOT NULL,
+  target_repo TEXT NOT NULL,
+  source_visibility VARCHAR(16) NOT NULL DEFAULT 'unknown'
+    CHECK (source_visibility IN ('private', 'public', 'internal', 'unknown')),
+  target_visibility VARCHAR(16) NOT NULL DEFAULT 'unknown'
+    CHECK (target_visibility IN ('private', 'public', 'internal', 'unknown')),
+  risk_level VARCHAR(24) NOT NULL DEFAULT 'normal'
+    CHECK (risk_level IN ('private_to_public', 'admin_block', 'normal')),
+  authorization_status VARCHAR(16) NOT NULL DEFAULT 'blocked'
+    CHECK (authorization_status IN ('authorized', 'blocked', 'revoked')),
+  authorized_by TEXT NOT NULL,
+  authorized_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  acknowledgment TEXT NOT NULL DEFAULT '',
+  revoked_by TEXT,
+  revoked_at TIMESTAMPTZ,
+  revocation_reason TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Governance alert log — blocked sync attempts, warnings shown on dashboard
+CREATE TABLE IF NOT EXISTS governance_alerts (
+  id BIGSERIAL PRIMARY KEY,
+  alert_type VARCHAR(32) NOT NULL
+    CHECK (alert_type IN ('private_to_public_blocked', 'authorization_revoked', 'admin_block', 'visibility_changed')),
+  severity VARCHAR(16) NOT NULL DEFAULT 'warning'
+    CHECK (severity IN ('critical', 'warning', 'info')),
+  mapping_id BIGINT REFERENCES repo_mappings(id) ON DELETE SET NULL,
+  profile_id BIGINT REFERENCES sync_profiles(id) ON DELETE SET NULL,
+  source_repo TEXT,
+  target_repo TEXT,
+  message TEXT NOT NULL,
+  acknowledged BOOLEAN NOT NULL DEFAULT FALSE,
+  acknowledged_by TEXT,
+  acknowledged_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Default admin user (password: admin — user MUST change on first login)
 -- Hash format: sha256:<salt>:<hex_digest> using Digest::SHA
 INSERT INTO users (username, password_hash, role)

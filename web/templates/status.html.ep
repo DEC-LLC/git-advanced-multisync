@@ -30,6 +30,7 @@
           <li class="nav-item"><a class="nav-link" href="/mappings">Mappings</a></li>
           <li class="nav-item"><a class="nav-link" href="/jobs">Jobs</a></li>
           <li class="nav-item"><a class="nav-link active" href="/status">Status</a></li>
+          <li class="nav-item"><a class="nav-link" href="/authorizations">Authorizations</a></li>
         </ul>
         <span class="navbar-text text-light me-3">
           <i class="bi bi-person"></i> <%= $current_user->{username} %>

@@ -4,8 +4,9 @@ use warnings;
 use File::Path qw(make_path rmtree);
 use File::Spec;
 use POSIX qw(strftime);
+use Mojo::UserAgent;
 use Exporter 'import';
-our @EXPORT_OK = qw(run_sync_job branch_matches_filter);
+our @EXPORT_OK = qw(run_sync_job branch_matches_filter check_repo_visibility);
 
 # ── Branch filter matching (glob-style) ─────────────────────────────
 sub branch_matches_filter {
@@ -18,6 +19,50 @@ sub branch_matches_filter {
       return 1 if $branch =~ /^$re$/;
     }
     return 0;
+}
+
+# ── Repo visibility check (governance: private→public prevention) ──
+sub check_repo_visibility {
+    my (%args) = @_;
+    my $provider_type = $args{provider_type};
+    my $base_url      = $args{base_url};
+    my $token         = $args{token};
+    my $full_path     = $args{full_path};
+
+    my $ua = Mojo::UserAgent->new;
+    $ua->connect_timeout(10);
+    $ua->request_timeout(15);
+
+    my ($url, %headers);
+    if ($provider_type eq 'github') {
+        $url = "https://api.github.com/repos/$full_path";
+        %headers = ('Authorization' => "Bearer $token", 'Accept' => 'application/vnd.github+json', 'User-Agent' => 'gitmsyncd/1.0');
+    } elsif ($provider_type eq 'gitlab') {
+        my $base = $base_url || 'https://gitlab.com';
+        $base =~ s{/+$}{};
+        my $encoded_path = $full_path;
+        $encoded_path =~ s{/}{%2F}g;
+        $url = "$base/api/v4/projects/$encoded_path";
+        %headers = ('PRIVATE-TOKEN' => $token);
+    } elsif ($provider_type eq 'gitea') {
+        my $base = $base_url || 'https://gitea.com';
+        $base =~ s{/+$}{};
+        $url = "$base/api/v1/repos/$full_path";
+        %headers = ('Authorization' => "token $token");
+    }
+
+    my $tx = $ua->get($url => \%headers);
+    my $res = $tx->result;
+
+    if ($res && $res->is_success) {
+        my $body = eval { $res->json } || {};
+        if ($provider_type eq 'gitlab') {
+            return $body->{visibility} || 'unknown';  # 'private', 'internal', 'public'
+        } else {
+            return $body->{private} ? 'private' : 'public';
+        }
+    }
+    return 'unknown';  # can't determine, allow sync (fail open for unknown)
 }
 
 # ── Sync engine (shared by queue worker and direct run) ─────────
@@ -166,6 +211,53 @@ sub run_sync_job {
       my $conflict_policy = $profile->{conflict_policy} || 'ff-only';
 
       for my $m (@mappings) {
+        # ── Governance: check private->public ──────────────────────
+        my $src_vis = check_repo_visibility(
+            provider_type => $profile->{src_type},
+            base_url      => $profile->{src_base_url},
+            token         => $profile->{src_token},
+            full_path     => $m->{source_full_path},
+        );
+        my $tgt_vis = check_repo_visibility(
+            provider_type => $profile->{tgt_type},
+            base_url      => $profile->{tgt_base_url},
+            token         => $profile->{tgt_token},
+            full_path     => $m->{target_full_path},
+        );
+
+        # ── Check for admin block (any sync, any direction) ─────────
+        my $admin_block = $dbh->selectrow_hashref(
+            q{SELECT id, authorized_by, acknowledgment FROM sync_authorizations
+              WHERE mapping_id = ? AND risk_level = 'admin_block' AND authorization_status = 'blocked'
+              AND (revoked_at IS NULL)
+              LIMIT 1}, undef, $m->{id});
+        if ($admin_block) {
+            $log_event->('error', "BLOCKED: sync '$m->{source_full_path}' -> '$m->{target_full_path}' administratively blocked by $admin_block->{authorized_by}");
+            $failed++; next;
+        }
+
+        if ($src_vis eq 'private' && $tgt_vis eq 'public') {
+            # Check for active authorization
+            my $auth = $dbh->selectrow_hashref(
+                q{SELECT id FROM sync_authorizations
+                  WHERE mapping_id = ? AND authorization_status = 'authorized'
+                  AND (revoked_at IS NULL)
+                  LIMIT 1}, undef, $m->{id});
+
+            unless ($auth) {
+                $log_event->('error', "BLOCKED: private repo '$m->{source_full_path}' -> public target '$m->{target_full_path}' (no authorization -- private-to-public sync requires admin approval)");
+                # Record governance alert
+                eval { $dbh->do(
+                    q{INSERT INTO governance_alerts (alert_type, severity, mapping_id, profile_id, source_repo, target_repo, message)
+                      VALUES ('private_to_public_blocked', 'critical', ?, ?, ?, ?, ?)},
+                    undef, $m->{id}, $profile_id, $m->{source_full_path}, $m->{target_full_path},
+                    "Sync blocked: private repo '$m->{source_full_path}' cannot be synced to public target '$m->{target_full_path}' without admin authorization"
+                ); };
+                $failed++; next;
+            }
+            $log_event->('info', "authorized private->public sync: $m->{source_full_path} -> $m->{target_full_path} (auth #$auth->{id})");
+        }
+
         my $src_url = $build_url->($profile->{src_type}, $profile->{src_base_url}, $profile->{src_token}, $m->{source_full_path}, $src_proto);
         my $tgt_url = $build_url->($profile->{tgt_type}, $profile->{tgt_base_url}, $profile->{tgt_token}, $m->{target_full_path}, $tgt_proto);
 

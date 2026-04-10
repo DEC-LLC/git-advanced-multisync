@@ -654,7 +654,9 @@ sub start {
     my $providers = $c->dbh->selectall_arrayref(q{SELECT * FROM providers ORDER BY id}, { Slice => {} });
     my $profiles = $c->dbh->selectall_arrayref(q{SELECT sp.*, s.name as source_name, t.name as target_name FROM sync_profiles sp LEFT JOIN providers s ON sp.source_provider_id = s.id LEFT JOIN providers t ON sp.target_provider_id = t.id ORDER BY sp.id}, { Slice => {} });
     my $jobs = $c->dbh->selectall_arrayref(q{SELECT sj.*, sp.name as profile_name FROM sync_jobs sj LEFT JOIN sync_profiles sp ON sj.profile_id = sp.id ORDER BY sj.id DESC LIMIT 10}, { Slice => {} });
-    $c->stash(providers => $providers, profiles => $profiles, jobs => $jobs);
+    my $gov_alerts = $c->dbh->selectall_arrayref(
+        q{SELECT * FROM governance_alerts WHERE acknowledged = FALSE ORDER BY created_at DESC LIMIT 5}, { Slice => {} });
+    $c->stash(providers => $providers, profiles => $profiles, jobs => $jobs, gov_alerts => $gov_alerts);
     $c->render(template => 'index');
   };
 
@@ -843,6 +845,190 @@ sub start {
     my $id = $c->param('id');
     $c->dbh->do(q{UPDATE workers SET paused = FALSE, status = 'running' WHERE id = ?}, undef, $id);
     $c->render(json => { ok => Mojo::JSON->true, message => 'worker resumed' });
+  };
+
+  # ── Sync Authorizations (governance ledger) ──────────────────────
+
+  # List all authorizations
+  get '/api/authorizations' => sub ($c) {
+    my $rows = $c->dbh->selectall_arrayref(
+        q{SELECT sa.*, sp.name AS profile_name
+          FROM sync_authorizations sa
+          LEFT JOIN sync_profiles sp ON sa.profile_id = sp.id
+          ORDER BY sa.created_at DESC},
+        { Slice => {} }
+    );
+    $c->render(json => $rows);
+  };
+
+  # Authorize a private-to-public sync (admin only)
+  post '/api/authorizations' => sub ($c) {
+    return unless $require_admin->($c);
+    my $p = $c->req->json || {};
+    my $user = $c->stash('current_user');
+
+    for my $f (qw(mapping_id acknowledgment)) {
+      return $c->render(json => { error => "missing required field: $f" }, status => 400) unless $p->{$f};
+    }
+
+    # Acknowledgment must contain "I ACCEPT"
+    unless ($p->{acknowledgment} =~ /I ACCEPT/i) {
+      return $c->render(json => { error => 'Acknowledgment must contain "I ACCEPT" to confirm you understand the risk.' }, status => 400);
+    }
+
+    # Get the mapping details
+    my $mapping = $c->dbh->selectrow_hashref(
+        q{SELECT id, source_full_path, target_full_path, profile_id FROM repo_mappings WHERE id = ?},
+        undef, $p->{mapping_id});
+    return $c->render(json => { error => 'mapping not found' }, status => 404) unless $mapping;
+
+    # Check if already authorized
+    my $existing = $c->dbh->selectrow_hashref(
+        q{SELECT id FROM sync_authorizations WHERE mapping_id = ? AND authorization_status = 'authorized' AND revoked_at IS NULL},
+        undef, $p->{mapping_id});
+    if ($existing) {
+      return $c->render(json => { error => 'This mapping already has an active authorization.' }, status => 409);
+    }
+
+    eval {
+      $c->dbh->do(
+          q{INSERT INTO sync_authorizations
+            (mapping_id, profile_id, source_repo, target_repo,
+             source_visibility, target_visibility, risk_level,
+             authorization_status, authorized_by, acknowledgment)
+            VALUES (?, ?, ?, ?,
+                    COALESCE(?, 'private'), COALESCE(?, 'public'), 'private_to_public',
+                    'authorized', ?, ?)},
+          undef,
+          $mapping->{id}, $mapping->{profile_id},
+          $mapping->{source_full_path}, $mapping->{target_full_path},
+          $p->{source_visibility}, $p->{target_visibility},
+          $user->{username}, $p->{acknowledgment}
+      );
+    };
+    if ($@) {
+      return $c->render(json => { error => "authorization failed: $@" }, status => 500);
+    }
+
+    # Acknowledge any pending governance alerts for this mapping
+    $c->dbh->do(
+        q{UPDATE governance_alerts SET acknowledged = TRUE, acknowledged_by = ?, acknowledged_at = NOW()
+          WHERE mapping_id = ? AND acknowledged = FALSE},
+        undef, $user->{username}, $p->{mapping_id});
+
+    $c->render(json => { ok => Mojo::JSON->true, message => "Private-to-public sync authorized by $user->{username}" }, status => 201);
+  };
+
+  # Revoke an authorization (admin only)
+  post '/api/authorizations/:id/revoke' => sub ($c) {
+    return unless $require_admin->($c);
+    my $id = $c->param('id');
+    my $p = $c->req->json || {};
+    my $user = $c->stash('current_user');
+
+    my $auth = $c->dbh->selectrow_hashref(
+        q{SELECT id, authorization_status FROM sync_authorizations WHERE id = ?}, undef, $id);
+    return $c->render(json => { error => 'authorization not found' }, status => 404) unless $auth;
+    return $c->render(json => { error => 'already revoked' }, status => 409)
+        if $auth->{authorization_status} eq 'revoked';
+
+    $c->dbh->do(
+        q{UPDATE sync_authorizations SET authorization_status = 'revoked', revoked_by = ?, revoked_at = NOW(), revocation_reason = ? WHERE id = ?},
+        undef, $user->{username}, ($p->{reason} || 'Revoked by admin'), $id);
+
+    # Create governance alert
+    $c->dbh->do(
+        q{INSERT INTO governance_alerts (alert_type, severity, message)
+          VALUES ('authorization_revoked', 'warning', ?)},
+        undef, "Authorization #$id revoked by $user->{username}: " . ($p->{reason} || 'no reason given'));
+
+    $c->render(json => { ok => Mojo::JSON->true });
+  };
+
+  # Admin block — block ANY sync for any policy reason (admin only)
+  post '/api/authorizations/block' => sub ($c) {
+    return unless $require_admin->($c);
+    my $p = $c->req->json || {};
+    my $user = $c->stash('current_user');
+
+    return $c->render(json => { error => 'mapping_id and reason required' }, status => 400)
+      unless $p->{mapping_id} && $p->{reason};
+
+    my $mapping = $c->dbh->selectrow_hashref(
+      q{SELECT id, source_full_path, target_full_path, profile_id FROM repo_mappings WHERE id = ?},
+      undef, $p->{mapping_id});
+    return $c->render(json => { error => 'mapping not found' }, status => 404) unless $mapping;
+
+    eval {
+      $c->dbh->do(
+        q{INSERT INTO sync_authorizations
+          (mapping_id, profile_id, source_repo, target_repo,
+           source_visibility, target_visibility, risk_level,
+           authorization_status, authorized_by, acknowledgment)
+          VALUES (?, ?, ?, ?,
+                  'unknown', 'unknown', 'admin_block',
+                  'blocked', ?, ?)},
+        undef,
+        $mapping->{id}, $mapping->{profile_id},
+        $mapping->{source_full_path}, $mapping->{target_full_path},
+        $user->{username}, "ADMIN BLOCK: $p->{reason}"
+      );
+    };
+    if ($@) {
+      return $c->render(json => { error => "block failed: $@" }, status => 500);
+    }
+
+    # Create governance alert
+    eval { $c->dbh->do(
+      q{INSERT INTO governance_alerts (alert_type, severity, mapping_id, profile_id, source_repo, target_repo, message)
+        VALUES ('admin_block', 'critical', ?, ?, ?, ?, ?)},
+      undef, $mapping->{id}, $mapping->{profile_id},
+      $mapping->{source_full_path}, $mapping->{target_full_path},
+      "Sync administratively blocked by $user->{username}: $p->{reason}"
+    ); };
+
+    $c->render(json => { ok => Mojo::JSON->true,
+      message => "Sync blocked by $user->{username}: $p->{reason}" }, status => 201);
+  };
+
+  # List governance alerts (unacknowledged ones shown on dashboard)
+  get '/api/governance/alerts' => sub ($c) {
+    my $limit = $c->param('limit') || 50;
+    my $unacked_only = $c->param('unacknowledged');
+    my $where = $unacked_only ? 'WHERE acknowledged = FALSE' : '';
+    my $rows = $c->dbh->selectall_arrayref(
+        "SELECT * FROM governance_alerts $where ORDER BY created_at DESC LIMIT ?",
+        { Slice => {} }, $limit);
+    $c->render(json => $rows);
+  };
+
+  # Acknowledge a governance alert
+  post '/api/governance/alerts/:id/acknowledge' => sub ($c) {
+    return unless $require_admin->($c);
+    my $id = $c->param('id');
+    my $user = $c->stash('current_user');
+    $c->dbh->do(
+        q{UPDATE governance_alerts SET acknowledged = TRUE, acknowledged_by = ?, acknowledged_at = NOW() WHERE id = ?},
+        undef, $user->{username}, $id);
+    $c->render(json => { ok => Mojo::JSON->true });
+  };
+
+  # ── Authorizations web page ───────────────────────────────────────
+
+  get '/authorizations' => sub ($c) {
+    my $authorizations = $c->dbh->selectall_arrayref(
+        q{SELECT sa.*, sp.name AS profile_name FROM sync_authorizations sa
+          LEFT JOIN sync_profiles sp ON sa.profile_id = sp.id
+          ORDER BY sa.created_at DESC LIMIT 100}, { Slice => {} });
+    my $alerts = $c->dbh->selectall_arrayref(
+        q{SELECT * FROM governance_alerts WHERE acknowledged = FALSE ORDER BY created_at DESC LIMIT 20}, { Slice => {} });
+    my $mappings = $c->dbh->selectall_arrayref(
+        q{SELECT rm.id, rm.source_full_path, rm.target_full_path, rm.profile_id, sp.name AS profile_name
+          FROM repo_mappings rm
+          LEFT JOIN sync_profiles sp ON rm.profile_id = sp.id
+          WHERE rm.enabled = TRUE ORDER BY rm.id}, { Slice => {} });
+    $c->stash(authorizations => $authorizations, alerts => $alerts, mappings => $mappings);
+    $c->render(template => 'authorizations');
   };
 
   # ── Auto-start workers on boot ───────────────────────────────
