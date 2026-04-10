@@ -54,6 +54,7 @@ cp bin/gitmsyncd-worker.pl $RPM_BUILD_ROOT%{_gitmsyncd_dir}/bin/
 cp lib/Gitmsyncd/App.pm $RPM_BUILD_ROOT%{_gitmsyncd_dir}/lib/Gitmsyncd/
 cp lib/Gitmsyncd/SyncEngine.pm $RPM_BUILD_ROOT%{_gitmsyncd_dir}/lib/Gitmsyncd/
 cp lib/Gitmsyncd/ResourceGovernor.pm $RPM_BUILD_ROOT%{_gitmsyncd_dir}/lib/Gitmsyncd/
+cp lib/Gitmsyncd/SyslogExporter.pm $RPM_BUILD_ROOT%{_gitmsyncd_dir}/lib/Gitmsyncd/
 cp -a web/templates/*.html.ep $RPM_BUILD_ROOT%{_gitmsyncd_dir}/web/templates/
 cp -a web/public/* $RPM_BUILD_ROOT%{_gitmsyncd_dir}/web/public/ 2>/dev/null || true
 cp db/schema.sql $RPM_BUILD_ROOT%{_gitmsyncd_dir}/db/

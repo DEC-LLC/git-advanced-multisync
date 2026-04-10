@@ -34,7 +34,7 @@ RUN mkdir -p /opt/gitmsyncd/{bin,lib/Gitmsyncd,web/templates,web/public,db} \
 # Copy application files
 COPY cpanfile /opt/gitmsyncd/
 COPY bin/gitmsyncd.pl bin/gitmsyncd-worker.pl /opt/gitmsyncd/bin/
-COPY lib/Gitmsyncd/App.pm lib/Gitmsyncd/SyncEngine.pm lib/Gitmsyncd/ResourceGovernor.pm /opt/gitmsyncd/lib/Gitmsyncd/
+COPY lib/Gitmsyncd/App.pm lib/Gitmsyncd/SyncEngine.pm lib/Gitmsyncd/ResourceGovernor.pm lib/Gitmsyncd/SyslogExporter.pm /opt/gitmsyncd/lib/Gitmsyncd/
 COPY web/templates/*.html.ep /opt/gitmsyncd/web/templates/
 COPY db/schema.sql /opt/gitmsyncd/db/
 
