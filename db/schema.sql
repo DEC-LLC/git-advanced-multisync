@@ -26,6 +26,12 @@ CREATE TABLE IF NOT EXISTS repo_mappings (
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
   branch_filter TEXT DEFAULT NULL,
   profile_id BIGINT DEFAULT NULL,  -- FK added after sync_profiles table created
+  -- Debug tap: temporary per-mapping verbose logging (auto-expires)
+  -- Detail stays in sync_job_events, NEVER goes to syslog
+  debug_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  debug_expires_at TIMESTAMPTZ DEFAULT NULL,
+  debug_file_cap INT DEFAULT 10,
+  debug_enabled_by TEXT DEFAULT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE(source_provider, source_full_path, target_provider, target_full_path, direction)
 );
@@ -33,6 +39,10 @@ CREATE TABLE IF NOT EXISTS repo_mappings (
 -- Migrations for existing installs
 ALTER TABLE repo_mappings ADD COLUMN IF NOT EXISTS branch_filter TEXT DEFAULT NULL;
 ALTER TABLE repo_mappings ADD COLUMN IF NOT EXISTS profile_id BIGINT;
+ALTER TABLE repo_mappings ADD COLUMN IF NOT EXISTS debug_enabled BOOLEAN DEFAULT FALSE;
+ALTER TABLE repo_mappings ADD COLUMN IF NOT EXISTS debug_expires_at TIMESTAMPTZ;
+ALTER TABLE repo_mappings ADD COLUMN IF NOT EXISTS debug_file_cap INT DEFAULT 10;
+ALTER TABLE repo_mappings ADD COLUMN IF NOT EXISTS debug_enabled_by TEXT;
 
 CREATE TABLE IF NOT EXISTS providers (
   id BIGSERIAL PRIMARY KEY,

@@ -265,6 +265,42 @@ sub start {
     $c->render(json => { ok => Mojo::JSON->true });
   };
 
+  # ── Debug tap: enable/disable per-mapping verbose logging ─────────
+  post '/api/mappings/:id/debug' => sub ($c) {
+    return unless $require_admin->($c);
+    my $id = $c->param('id');
+    my $p = $c->req->json || {};
+    my $user = $c->stash('current_user');
+    my $enabled = $p->{enabled} ? 1 : 0;
+
+    my $existing = $c->dbh->selectrow_hashref(
+      q{SELECT id FROM repo_mappings WHERE id = ?}, undef, $id);
+    return $c->render(json => { error => 'mapping not found' }, status => 404) unless $existing;
+
+    if ($enabled) {
+      # Default: 30 minutes, max 60, cap 10 files
+      my $minutes = $p->{duration_minutes} || 30;
+      $minutes = 60 if $minutes > 60;  # hard cap
+      my $file_cap = $p->{file_cap} || 10;
+      $file_cap = 50 if $file_cap > 50;  # hard cap
+
+      $c->dbh->do(
+        q{UPDATE repo_mappings SET debug_enabled = TRUE,
+          debug_expires_at = NOW() + (? || ' minutes')::interval,
+          debug_file_cap = ?, debug_enabled_by = ?
+          WHERE id = ?},
+        undef, $minutes, $file_cap, $user->{username}, $id);
+      $c->render(json => { ok => Mojo::JSON->true,
+        message => "Debug enabled for $minutes minutes (max $file_cap files per cycle)",
+        expires_in_minutes => $minutes });
+    } else {
+      $c->dbh->do(
+        q{UPDATE repo_mappings SET debug_enabled = FALSE, debug_expires_at = NULL,
+          debug_enabled_by = NULL WHERE id = ?}, undef, $id);
+      $c->render(json => { ok => Mojo::JSON->true, message => 'Debug disabled' });
+    }
+  };
+
   post '/api/sync/start/:profile_id' => sub ($c) {
     return unless $require_admin->($c);
     my $id = $c->param('profile_id');

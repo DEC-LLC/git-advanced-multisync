@@ -294,6 +294,29 @@ sub run_sync_job {
           $failed++; next;
         }
 
+        # ── Debug tap: per-file detail (temporary, capped, local log only) ──
+        if ($m->{debug_enabled}) {
+          # Auto-expire check
+          if ($m->{debug_expires_at} && $m->{debug_expires_at} lt strftime('%Y-%m-%d %H:%M:%S', localtime)) {
+            eval { $dbh->do(q{UPDATE repo_mappings SET debug_enabled = FALSE, debug_expires_at = NULL WHERE id = ?}, undef, $m->{id}); };
+            $log_event->('info', "debug tap expired for $m->{source_full_path}");
+          } else {
+            my $cap = $m->{debug_file_cap} || 10;
+            my @files = split(/\n/, `git -C '$repo_dir' ls-tree -r --name-only HEAD 2>/dev/null | head -$cap`);
+            my $total = `git -C '$repo_dir' ls-tree -r --name-only HEAD 2>/dev/null | wc -l`;
+            chomp $total;
+            $log_event->('info', "DEBUG TAP ($m->{source_full_path}): $total files total, showing first $cap:");
+            for my $f (@files) {
+              chomp $f;
+              next unless $f;
+              my $size = `git -C '$repo_dir' cat-file -s HEAD:"$f" 2>/dev/null` || '?';
+              chomp $size;
+              $log_event->('info', "  DEBUG FILE: $f ($size bytes)");
+            }
+            $log_event->('info', "  ... and " . ($total - $cap) . " more files") if $total > $cap;
+          }
+        }
+
         if ($conflict_policy eq 'reject') {
           # Fetch target, check for divergence, skip entirely if any branch diverged
           my $fetch_tgt = $tgt_ssh_cmd
