@@ -287,10 +287,12 @@ sub start {
       return $c->render(json => { ok => Mojo::JSON->true, message => 'Debug taps disabled' });
     }
 
-    my $minutes = $p->{duration_minutes} || 30;
-    $minutes = 60 if $minutes > 60;
-    my $file_cap = $p->{file_cap} || 10;
+    # Default: one-shot (5 files, expires after 1 sync cycle = 1 minute).
+    # Only stays on longer if admin explicitly sets duration_minutes.
+    my $file_cap = $p->{file_cap} || 5;
     $file_cap = 50 if $file_cap > 50;
+    my $minutes = $p->{duration_minutes} || 1;  # 1 minute = one cycle then auto-off
+    $minutes = 15 if $minutes > 15;  # hard cap: 15 min max, not 60
 
     my $src_tap = ($tap eq 'source' || $tap eq 'both') ? 'TRUE' : 'FALSE';
     my $tgt_tap = ($tap eq 'target' || $tap eq 'both') ? 'TRUE' : 'FALSE';
@@ -305,9 +307,10 @@ sub start {
     my @active;
     push @active, 'source' if $src_tap eq 'TRUE';
     push @active, 'target' if $tgt_tap eq 'TRUE';
+    my $mode = ($p->{duration_minutes} && $p->{duration_minutes} > 1) ? "sustained ($minutes min)" : "one-shot (next sync cycle)";
     $c->render(json => { ok => Mojo::JSON->true,
-      taps => \@active,
-      message => "Debug taps [" . join(', ', @active) . "] enabled for $minutes minutes (max $file_cap files)",
+      taps => \@active, mode => $mode,
+      message => "Debug taps [" . join(', ', @active) . "] — $mode, $file_cap files max",
       expires_in_minutes => $minutes });
   };
 

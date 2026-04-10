@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS repo_mappings (
   debug_source_tap BOOLEAN NOT NULL DEFAULT FALSE,
   debug_target_tap BOOLEAN NOT NULL DEFAULT FALSE,
   debug_expires_at TIMESTAMPTZ DEFAULT NULL,
-  debug_file_cap INT DEFAULT 10,
+  debug_file_cap INT DEFAULT 5,
   debug_enabled_by TEXT DEFAULT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE(source_provider, source_full_path, target_provider, target_full_path, direction)
