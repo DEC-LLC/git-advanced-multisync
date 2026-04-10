@@ -225,7 +225,9 @@ sub run_sync_job {
             full_path     => $m->{target_full_path},
         );
 
-        # ── Check for admin block (any sync, any direction) ─────────
+        # ── Governance: every sync decision recorded in ledger ─────
+
+        # Check for admin block (any sync, any direction)
         my $admin_block = $dbh->selectrow_hashref(
             q{SELECT id, authorized_by, acknowledgment FROM sync_authorizations
               WHERE mapping_id = ? AND risk_level = 'admin_block' AND authorization_status = 'blocked'
@@ -233,29 +235,67 @@ sub run_sync_job {
               LIMIT 1}, undef, $m->{id});
         if ($admin_block) {
             $log_event->('error', "BLOCKED: sync '$m->{source_full_path}' -> '$m->{target_full_path}' administratively blocked by $admin_block->{authorized_by}");
+            # Record in governance alerts
+            eval { $dbh->do(
+                q{INSERT INTO governance_alerts (alert_type, severity, mapping_id, profile_id, source_repo, target_repo, message)
+                  VALUES ('admin_block', 'critical', ?, ?, ?, ?, ?)},
+                undef, $m->{id}, $profile_id, $m->{source_full_path}, $m->{target_full_path},
+                "Sync blocked by admin '$admin_block->{authorized_by}': $admin_block->{acknowledgment}"
+            ); };
             $failed++; next;
         }
 
+        # Check private→public
         if ($src_vis eq 'private' && $tgt_vis eq 'public') {
-            # Check for active authorization
             my $auth = $dbh->selectrow_hashref(
-                q{SELECT id FROM sync_authorizations
+                q{SELECT id, authorized_by FROM sync_authorizations
                   WHERE mapping_id = ? AND authorization_status = 'authorized'
                   AND (revoked_at IS NULL)
                   LIMIT 1}, undef, $m->{id});
 
             unless ($auth) {
-                $log_event->('error', "BLOCKED: private repo '$m->{source_full_path}' -> public target '$m->{target_full_path}' (no authorization -- private-to-public sync requires admin approval)");
-                # Record governance alert
+                $log_event->('error', "BLOCKED: private repo '$m->{source_full_path}' -> public target '$m->{target_full_path}' (no authorization)");
+                # Record blocked attempt in governance alerts
                 eval { $dbh->do(
                     q{INSERT INTO governance_alerts (alert_type, severity, mapping_id, profile_id, source_repo, target_repo, message)
                       VALUES ('private_to_public_blocked', 'critical', ?, ?, ?, ?, ?)},
                     undef, $m->{id}, $profile_id, $m->{source_full_path}, $m->{target_full_path},
                     "Sync blocked: private repo '$m->{source_full_path}' cannot be synced to public target '$m->{target_full_path}' without admin authorization"
                 ); };
+                # Record the blocked decision in the authorization ledger (first time only)
+                my $existing_block = $dbh->selectrow_hashref(
+                    q{SELECT id FROM sync_authorizations WHERE mapping_id = ? AND risk_level = 'private_to_public' AND authorization_status = 'blocked' LIMIT 1},
+                    undef, $m->{id});
+                unless ($existing_block) {
+                    eval { $dbh->do(
+                        q{INSERT INTO sync_authorizations
+                          (mapping_id, profile_id, source_repo, target_repo,
+                           source_visibility, target_visibility, risk_level,
+                           authorization_status, authorized_by, acknowledgment)
+                          VALUES (?, ?, ?, ?, ?, ?, 'private_to_public', 'blocked', 'system', 'Auto-blocked: private-to-public sync attempted without authorization')},
+                        undef, $m->{id}, $profile_id, $m->{source_full_path}, $m->{target_full_path},
+                        $src_vis, $tgt_vis
+                    ); };
+                }
                 $failed++; next;
             }
-            $log_event->('info', "authorized private->public sync: $m->{source_full_path} -> $m->{target_full_path} (auth #$auth->{id})");
+            $log_event->('info', "authorized private->public sync: $m->{source_full_path} -> $m->{target_full_path} (auth #$auth->{id}, by $auth->{authorized_by})");
+        } else {
+            # Normal sync (not private→public) — record first-time authorization only
+            my $existing_auth = $dbh->selectrow_hashref(
+                q{SELECT id FROM sync_authorizations WHERE mapping_id = ? AND risk_level = 'normal' LIMIT 1},
+                undef, $m->{id});
+            unless ($existing_auth) {
+                eval { $dbh->do(
+                    q{INSERT INTO sync_authorizations
+                      (mapping_id, profile_id, source_repo, target_repo,
+                       source_visibility, target_visibility, risk_level,
+                       authorization_status, authorized_by, acknowledgment)
+                      VALUES (?, ?, ?, ?, ?, ?, 'normal', 'authorized', 'system', 'Auto-authorized: no governance restriction applies')},
+                    undef, $m->{id}, $profile_id, $m->{source_full_path}, $m->{target_full_path},
+                    $src_vis, $tgt_vis
+                ); };
+            }
         }
 
         my $src_url = $build_url->($profile->{src_type}, $profile->{src_base_url}, $profile->{src_token}, $m->{source_full_path}, $src_proto);
