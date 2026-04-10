@@ -10,6 +10,7 @@ use POSIX qw(strftime setsid);
 use Digest::SHA qw(sha256_hex);
 use Sys::Hostname;
 use Gitmsyncd::SyncEngine qw(run_sync_job branch_matches_filter);
+use Gitmsyncd::SyslogExporter qw(syslog_send syslog_from_db);
 
 sub start {
   my ($self) = @_;
@@ -27,6 +28,9 @@ sub start {
     state $dbh = DBI->connect($dsn, $user, $pass, { RaiseError => 1, AutoCommit => 1, pg_enable_utf8 => 1 });
     return $dbh;
   };
+
+  # Load syslog config from DB at startup (silently skip if table doesn't exist yet)
+  eval { syslog_from_db(DBI->connect($dsn, $user, $pass, { RaiseError => 0, PrintError => 0 })); };
 
   # ── Session secret ────────────────────────────────────────────────
   app->secrets(['gitmsyncd-change-this-secret-' . ($ENV{GITMSYNCD_SECRET} || 'dev')]);
@@ -93,6 +97,7 @@ sub start {
       $c->dbh->do(q{UPDATE users SET last_login_at = NOW() WHERE id = ?}, undef, $user->{id});
       $c->redirect_to('/');
     } else {
+      syslog_send(severity => 'warning', message => "AUTH: failed login attempt for user '$username' from " . $c->tx->remote_address);
       $c->stash(error => 'Invalid username or password');
       $c->render(template => 'login');
     }
@@ -939,6 +944,7 @@ sub start {
           WHERE mapping_id = ? AND acknowledged = FALSE},
         undef, $user->{username}, $p->{mapping_id});
 
+    syslog_send(severity => 'warning', message => "GOVERNANCE: private-to-public sync authorized by $user->{username} for mapping $p->{mapping_id}");
     $c->render(json => { ok => Mojo::JSON->true, message => "Private-to-public sync authorized by $user->{username}" }, status => 201);
   };
 
@@ -965,6 +971,7 @@ sub start {
           VALUES ('authorization_revoked', 'warning', ?)},
         undef, "Authorization #$id revoked by $user->{username}: " . ($p->{reason} || 'no reason given'));
 
+    syslog_send(severity => 'warning', message => "GOVERNANCE: authorization #$id revoked by $user->{username}: " . ($p->{reason} || 'no reason'));
     $c->render(json => { ok => Mojo::JSON->true });
   };
 
@@ -1010,6 +1017,7 @@ sub start {
       "Sync administratively blocked by $user->{username}: $p->{reason}"
     ); };
 
+    syslog_send(severity => 'alert', message => "GOVERNANCE: sync administratively blocked by $user->{username} for mapping $p->{mapping_id}: $p->{reason}");
     $c->render(json => { ok => Mojo::JSON->true,
       message => "Sync blocked by $user->{username}: $p->{reason}" }, status => 201);
   };
@@ -1052,6 +1060,74 @@ sub start {
           WHERE rm.enabled = TRUE ORDER BY rm.id}, { Slice => {} });
     $c->stash(authorizations => $authorizations, alerts => $alerts, mappings => $mappings);
     $c->render(template => 'authorizations');
+  };
+
+  # ── Instance Settings API (exposed for Fleet to push config) ─────
+
+  # Get all settings
+  get '/api/settings' => sub ($c) {
+    return unless $require_admin->($c);
+    my $rows = $c->dbh->selectall_arrayref(
+      q{SELECT key, value, updated_at, updated_by FROM instance_settings ORDER BY key},
+      { Slice => {} });
+    my %settings = map { $_->{key} => $_ } @$rows;
+    $c->render(json => \%settings);
+  };
+
+  # Get a single setting
+  get '/api/settings/:key' => sub ($c) {
+    my $key = $c->param('key');
+    my $row = $c->dbh->selectrow_hashref(
+      q{SELECT key, value, updated_at, updated_by FROM instance_settings WHERE key = ?},
+      undef, $key);
+    return $c->render(json => { error => 'setting not found' }, status => 404) unless $row;
+    $c->render(json => $row);
+  };
+
+  # Update settings (admin or Fleet)
+  put '/api/settings' => sub ($c) {
+    return unless $require_admin->($c);
+    my $p = $c->req->json || {};
+    my $user = $c->stash('current_user');
+    my $updated = 0;
+
+    for my $key (keys %$p) {
+      $c->dbh->do(
+        q{INSERT INTO instance_settings (key, value, updated_at, updated_by)
+          VALUES (?, ?, NOW(), ?)
+          ON CONFLICT (key) DO UPDATE SET value = ?, updated_at = NOW(), updated_by = ?},
+        undef, $key, $p->{$key}, $user->{username}, $p->{$key}, $user->{username});
+      $updated++;
+    }
+
+    # If syslog settings changed, reload syslog config
+    if (grep { /^syslog_/ } keys %$p) {
+      syslog_from_db($c->dbh);
+      syslog_send(severity => 'info', message => "syslog config updated by $user->{username}");
+    }
+
+    $c->render(json => { ok => Mojo::JSON->true, updated => $updated });
+  };
+
+  # Convenience: get syslog config specifically
+  get '/api/settings/syslog' => sub ($c) {
+    return unless $require_admin->($c);
+    my $rows = $c->dbh->selectall_arrayref(
+      q{SELECT key, value FROM instance_settings WHERE key LIKE 'syslog_%' ORDER BY key},
+      { Slice => {} });
+    my %syslog = map { $_->{key} => $_->{value} } @$rows;
+    $c->render(json => \%syslog);
+  };
+
+  # Test syslog connection
+  post '/api/settings/syslog/test' => sub ($c) {
+    return unless $require_admin->($c);
+    my $cfg = syslog_from_db($c->dbh);
+    unless ($cfg && $cfg->{syslog_enabled} eq 'true' && $cfg->{syslog_host}) {
+      return $c->render(json => { error => 'syslog not configured or not enabled' }, status => 400);
+    }
+    syslog_send(severity => 'info', message => 'gitmsyncd syslog test message', config => $cfg);
+    $c->render(json => { ok => Mojo::JSON->true, message => "test message sent to $cfg->{syslog_host}:$cfg->{syslog_port}" });
   };
 
   # ── Fleet Binding Lock (routes — helpers declared above) ─────────
@@ -1109,6 +1185,7 @@ sub start {
     if ($@) {
       return $c->render(json => { error => "bind failed: $@" }, status => 500);
     }
+    syslog_send(severity => 'notice', message => "FLEET: bound to Fleet '$p->{fleet_name}' ($p->{fleet_id}) by $user->{username}");
     $c->render(json => { ok => Mojo::JSON->true, message => "Bound to Fleet '$p->{fleet_name}'" }, status => 201);
   };
 
@@ -1140,6 +1217,7 @@ sub start {
       undef, "Instance unbound from Fleet '$lock->{fleet_name}' by $user->{username}: $p->{reason}"
     ); };
 
+    syslog_send(severity => 'alert', message => "FLEET: unbound from Fleet '$lock->{fleet_name}' by $user->{username}: $p->{reason}");
     $c->render(json => { ok => Mojo::JSON->true, message => "Unbound from Fleet '$lock->{fleet_name}'" });
   };
 

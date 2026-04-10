@@ -212,6 +212,25 @@ CREATE TABLE IF NOT EXISTS fleet_lock_audit (
   ip_address TEXT
 );
 
+-- ── Instance Settings (key-value, API-exposed for Fleet) ────────────
+CREATE TABLE IF NOT EXISTS instance_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_by TEXT
+);
+
+-- Default syslog settings (disabled until configured)
+INSERT INTO instance_settings (key, value) VALUES
+  ('syslog_enabled', 'false'),
+  ('syslog_host', ''),
+  ('syslog_port', '514'),
+  ('syslog_protocol', 'udp'),
+  ('syslog_facility', 'local0'),
+  ('syslog_tag', 'gitmsyncd'),
+  ('instance_name', 'default')
+ON CONFLICT (key) DO NOTHING;
+
 -- Default admin user (password: admin — user MUST change on first login)
 -- Hash format: sha256:<salt>:<hex_digest> using Digest::SHA
 INSERT INTO users (username, password_hash, role)
