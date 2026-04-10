@@ -228,6 +228,7 @@ INSERT INTO instance_settings (key, value) VALUES
   ('syslog_protocol', 'udp'),
   ('syslog_facility', 'local0'),
   ('syslog_tag', 'gitmsyncd'),
+  ('syslog_level', 'standard'),
   ('instance_name', 'default')
 ON CONFLICT (key) DO NOTHING;
 

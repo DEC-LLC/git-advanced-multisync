@@ -38,6 +38,16 @@ sub syslog_from_db {
     return \%cfg;
 }
 
+# Syslog log levels — controls what gets forwarded
+#   quiet:    only critical security events (failed login, unbind, admin block)
+#   standard: governance + security (above + authorize, revoke, bind)
+#   verbose:  above + job completion summaries (one line per job, NOT per file)
+my %LEVEL_GATES = (
+    quiet    => { emergency => 1, alert => 1, critical => 1 },
+    standard => { emergency => 1, alert => 1, critical => 1, error => 1, warning => 1, notice => 1 },
+    verbose  => { emergency => 1, alert => 1, critical => 1, error => 1, warning => 1, notice => 1, info => 1 },
+);
+
 # Send a syslog message
 # syslog_send(severity => 'info', message => 'sync completed', config => \%cfg)
 # config is optional — uses cached config from syslog_from_db if not passed
@@ -47,6 +57,12 @@ sub syslog_send {
     return unless $cfg;
     return unless $cfg->{syslog_enabled} && $cfg->{syslog_enabled} eq 'true';
     return unless $cfg->{syslog_host} && $cfg->{syslog_host} =~ /\S/;
+
+    # Check log level gate — drop messages below configured threshold
+    my $level = $cfg->{syslog_level} || 'standard';
+    my $gate = $LEVEL_GATES{$level} || $LEVEL_GATES{standard};
+    my $sev = $args{severity} || 'info';
+    return unless $gate->{$sev};
 
     my $host     = $cfg->{syslog_host};
     my $port     = $cfg->{syslog_port} || 514;
