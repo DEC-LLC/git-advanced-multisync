@@ -281,6 +281,24 @@
       document.getElementById('btnAuthorize').disabled = !/I ACCEPT/i.test(val);
     }
 
+    // Fleet ID — fetched once on page load, included in governance API calls.
+    // If this core is bound to a Fleet, the Fleet ID is stored locally in fleet_lock.
+    // The browser reads it and includes it automatically — the admin doesn't need to know it.
+    let fleetId = null;
+    fetch('/api/fleet/status').then(r => r.json()).then(data => {
+      if (data.bound) {
+        fleetId = data.fleet_id;
+        console.log('Fleet bound: ' + data.fleet_name);
+      }
+    }).catch(() => {});
+
+    // Helper: build headers with Fleet ID when available
+    function governanceHeaders() {
+      const h = { 'Content-Type': 'application/json' };
+      if (fleetId) h['X-Fleet-ID'] = fleetId;
+      return h;
+    }
+
     // Mapping dropdown change handler
     document.getElementById('authMappingId').addEventListener('change', function() {
       const opt = this.options[this.selectedIndex];
@@ -320,7 +338,7 @@
 
       fetch('/api/authorizations', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: governanceHeaders(),
         body: JSON.stringify({
           mapping_id: parseInt(mappingId),
           acknowledgment: acknowledgment
@@ -351,7 +369,7 @@
 
       fetch('/api/authorizations/' + authId + '/revoke', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: governanceHeaders(),
         body: JSON.stringify({ reason: reason || 'Revoked by admin' })
       })
       .then(r => r.json().then(data => ({ status: r.status, data })))
