@@ -262,41 +262,15 @@ sub run_sync_job {
                     undef, $m->{id}, $profile_id, $m->{source_full_path}, $m->{target_full_path},
                     "Sync blocked: private repo '$m->{source_full_path}' cannot be synced to public target '$m->{target_full_path}' without admin authorization"
                 ); };
-                # Record the blocked decision in the authorization ledger (first time only)
-                my $existing_block = $dbh->selectrow_hashref(
-                    q{SELECT id FROM sync_authorizations WHERE mapping_id = ? AND risk_level = 'private_to_public' AND authorization_status = 'blocked' LIMIT 1},
-                    undef, $m->{id});
-                unless ($existing_block) {
-                    eval { $dbh->do(
-                        q{INSERT INTO sync_authorizations
-                          (mapping_id, profile_id, source_repo, target_repo,
-                           source_visibility, target_visibility, risk_level,
-                           authorization_status, authorized_by, acknowledgment)
-                          VALUES (?, ?, ?, ?, ?, ?, 'private_to_public', 'blocked', 'system', 'Auto-blocked: private-to-public sync attempted without authorization')},
-                        undef, $m->{id}, $profile_id, $m->{source_full_path}, $m->{target_full_path},
-                        $src_vis, $tgt_vis
-                    ); };
-                }
+                # Governance alert surfaces on dashboard. The authorization ledger
+                # is only written by explicit admin decisions (authorize/block/revoke),
+                # not by per-execution system events.
                 $failed++; next;
             }
             $log_event->('info', "authorized private->public sync: $m->{source_full_path} -> $m->{target_full_path} (auth #$auth->{id}, by $auth->{authorized_by})");
-        } else {
-            # Normal sync (not private→public) — record first-time authorization only
-            my $existing_auth = $dbh->selectrow_hashref(
-                q{SELECT id FROM sync_authorizations WHERE mapping_id = ? AND risk_level = 'normal' LIMIT 1},
-                undef, $m->{id});
-            unless ($existing_auth) {
-                eval { $dbh->do(
-                    q{INSERT INTO sync_authorizations
-                      (mapping_id, profile_id, source_repo, target_repo,
-                       source_visibility, target_visibility, risk_level,
-                       authorization_status, authorized_by, acknowledgment)
-                      VALUES (?, ?, ?, ?, ?, ?, 'normal', 'authorized', 'system', 'Auto-authorized: no governance restriction applies')},
-                    undef, $m->{id}, $profile_id, $m->{source_full_path}, $m->{target_full_path},
-                    $src_vis, $tgt_vis
-                ); };
-            }
         }
+        # Normal syncs (not private→public, not admin-blocked) proceed without ledger entry.
+        # The ledger records explicit decisions only: authorizations, blocks, revocations.
 
         my $src_url = $build_url->($profile->{src_type}, $profile->{src_base_url}, $profile->{src_token}, $m->{source_full_path}, $src_proto);
         my $tgt_url = $build_url->($profile->{tgt_type}, $profile->{tgt_base_url}, $profile->{tgt_token}, $m->{target_full_path}, $tgt_proto);
