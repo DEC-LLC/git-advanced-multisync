@@ -2,7 +2,7 @@
 
 Name:           git-advanced-multisync
 Version:        0.3.0
-Release:        1%{?dist}
+Release:        1.el10
 Summary:        Multi-provider Git repository sync engine with web UI
 
 License:        Apache-2.0
