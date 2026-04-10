@@ -375,6 +375,18 @@
 
   </div>
 
+    <!-- Content Integrity Notice -->
+    <div class="card mt-3 border-0">
+      <div class="card-body text-muted small">
+        <i class="bi bi-info-circle"></i>
+        <strong>Content Integrity:</strong>
+        The sync system syncs; we use hashing during sync to ensure copies are exact.
+        We cannot guarantee content. We encourage ownership and proof of file integrity
+        from developers and advise that they should always make file hashes in a manifest
+        available in their repository.
+      </div>
+    </div>
+
   <footer class="text-center py-3">
     git-advanced-multisync &mdash; DEC-LLC
   </footer>

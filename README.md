@@ -403,6 +403,15 @@ GA-FS Fleet is a commercial product available from [DEC-LLC](https://dec-llc.biz
 - **Token masking** — API tokens never displayed after entry.
 - **Sync locking** — Database-level lock prevents concurrent syncs of the same profile.
 - **HTTPS transport** — Default for all provider API calls and git operations.
+- **Sync governance** — Private-to-public syncs blocked by default. Admin blocks on any sync. Immutable authorization ledger records WHO authorized WHAT.
+- **Fleet binding lock** — Once bound to a GA-FS Fleet instance, only that Fleet can authorize governance changes. Prevents rogue takeover.
+- **Syslog forwarding** — Governance decisions, security events, and Fleet operations forwarded to syslog (configurable: quiet/standard/verbose).
+
+## Content Integrity
+
+The sync system syncs; we use hashing during sync to ensure copies are exact. We cannot guarantee content. We encourage ownership and proof of file integrity from developers and advise that they should always make file hashes in a manifest available in their repository.
+
+Git uses SHA-256 (or SHA-1) hashing for every object in the repository. When git-advanced-multisync clones and pushes, git itself verifies object integrity. If a clone or push produces a hash mismatch, git rejects the operation and the sync job reports a failure. The system ensures faithful replication of the repository state — content ownership and validation is the responsibility of the developers who commit to the repository.
 
 ## Documentation
 

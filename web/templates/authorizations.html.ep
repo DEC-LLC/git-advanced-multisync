@@ -261,6 +261,14 @@
             <li><span class="badge bg-danger">blocked</span> &mdash; Sync was attempted but blocked (no authorization)</li>
             <li><span class="badge bg-warning text-dark">revoked</span> &mdash; Authorization was revoked; future syncs will be blocked</li>
           </ul>
+          <h6>Administrative Blocks</h6>
+          <p>Admins can block <strong>any sync</strong> for policy reasons, regardless of source/target visibility.
+             Administrative blocks appear on the dashboard and must be explicitly revoked to resume syncing.</p>
+          <hr>
+          <h6><i class="bi bi-info-circle"></i> Content Integrity</h6>
+          <p class="text-muted small">The sync system syncs; we use hashing during sync to ensure copies are exact.
+             We cannot guarantee content. We encourage ownership and proof of file integrity from developers
+             and advise that they should always make file hashes in a manifest available in their repository.</p>
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
