@@ -4,3 +4,7 @@
 *.swp
 *.log
 MEMORY-*.md
+
+# Editor/IDE state (per-workstation, not for repo)
+.vscode/
+.idea/
