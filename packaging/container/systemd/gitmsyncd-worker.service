@@ -1,0 +1,18 @@
+[Unit]
+Description=gitmsyncd worker (background sync executor)
+After=network-online.target gitmsyncd-web.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gitmsyncd
+Group=gitmsyncd
+WorkingDirectory=/opt/gitmsyncd
+EnvironmentFile=-/etc/gitmsyncd/env
+Environment=GITMSYNCD_WORKER_SET=default
+ExecStart=/usr/bin/perl /opt/gitmsyncd/bin/gitmsyncd-worker.pl --set=${GITMSYNCD_WORKER_SET}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

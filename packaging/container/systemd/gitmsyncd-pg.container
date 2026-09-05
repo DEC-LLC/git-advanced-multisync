@@ -1,0 +1,22 @@
+[Unit]
+Description=gitmsyncd PostgreSQL 16 (OVS-attach, dedicated per-instance DB)
+Wants=network-online.target openvswitch.service
+After=network-online.target openvswitch.service
+
+[Container]
+Image=docker.io/library/postgres:16-alpine
+ContainerName=gitmsyncd-pg
+HostName=gitmsyncd-pg-server3.decllc.biz
+Network=none
+PodmanArgs=--cap-add=NET_ADMIN --cap-add=NET_RAW
+Volume=gitmsyncd_pgdata:/var/lib/postgresql/data
+Volume=/opt/decllc/nm/99-managed.conf:/etc/NetworkManager/conf.d/99-managed.conf:ro
+Volume=/opt/decllc/nm/20-eth0-dhcp.nmconnection:/etc/NetworkManager/system-connections/20-eth0-dhcp.nmconnection:ro
+EnvironmentFile=/etc/gitmsyncd-pg/env
+
+[Service]
+Restart=always
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

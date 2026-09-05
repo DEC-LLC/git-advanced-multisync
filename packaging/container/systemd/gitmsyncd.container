@@ -1,0 +1,25 @@
+[Unit]
+Description=gitmsyncd — multi-provider Git sync engine (systemd-in-container, OVS-attach)
+Wants=network-online.target openvswitch.service container-gitmsyncd-pg.service
+After=network-online.target openvswitch.service container-gitmsyncd-pg.service container-ovs-attach@gitmsyncd-pg.service
+
+[Container]
+Image=registry.gitlab1.decllc.biz/github-mirror/git-advanced-multisync/gitmsyncd:2026-09-03
+ContainerName=gitmsyncd
+HostName=gitmsyncd-server3.decllc.biz
+Network=none
+Entrypoint=/sbin/init
+PodmanArgs=--systemd=always --cgroupns=host --cap-add=NET_ADMIN --cap-add=NET_RAW
+Volume=/sys/fs/cgroup:/sys/fs/cgroup:rw
+Volume=gitmsyncd_workdir:/var/lib/gitmsyncd/workdir
+Volume=/etc/gitmsyncd/env:/etc/gitmsyncd/env:ro
+Volume=/opt/decllc/nm/99-managed.conf:/etc/NetworkManager/conf.d/99-managed.conf:ro
+Volume=/opt/decllc/nm/20-eth0-dhcp.nmconnection:/etc/NetworkManager/system-connections/20-eth0-dhcp.nmconnection:ro
+EnvironmentFile=/etc/gitmsyncd/env
+
+[Service]
+Restart=always
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

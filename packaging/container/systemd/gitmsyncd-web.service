@@ -1,0 +1,18 @@
+[Unit]
+Description=gitmsyncd Mojolicious web + API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gitmsyncd
+Group=gitmsyncd
+WorkingDirectory=/opt/gitmsyncd
+EnvironmentFile=-/etc/gitmsyncd/env
+Environment=GITMSYNCD_LISTEN=http://0.0.0.0:9097
+ExecStart=/usr/bin/perl /opt/gitmsyncd/bin/gitmsyncd.pl
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
